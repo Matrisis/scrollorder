@@ -446,12 +446,13 @@ def test_each_writer_uses_its_own_partial_file_name(tmp_path, monkeypatch):
 def _answer(body):
     return Remote(base_url="https://h", cache_dir=Path("unused"), opener=lambda url: body)
 
-def test_list_refuses_a_non_utf8_answer_carrying_a_dtd():
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-16-le", "utf-16-be"])   # with and without a byte-order mark
+def test_list_refuses_a_non_utf8_answer_carrying_a_dtd(encoding):
     xml = ('<?xml version="1.0" encoding="UTF-16"?>'
            '<!DOCTYPE ListBucketResult [<!ENTITY e "boom">]>'
            '<ListBucketResult><Name>&e;</Name><IsTruncated>false</IsTruncated></ListBucketResult>')
     with pytest.raises(OSError):
-        _answer(xml.encode("utf-16")).list("P/")
+        _answer(xml.encode(encoding)).list("P/")
 
 def test_list_refuses_a_utf8_answer_carrying_a_dtd():
     xml = ('<?xml version="1.0" encoding="UTF-8"?>'

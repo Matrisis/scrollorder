@@ -183,6 +183,18 @@ def _local_name(tag: str) -> str:
     return tag.rpartition("}")[2]
 
 
+class _RefuseDoctype(ET.TreeBuilder):
+    """Tree builder that aborts as soon as expat meets a DOCTYPE, whatever the document's encoding.
+
+    The text check in ``_parse_listing`` is only a first filter: expat can re-detect an encoding the
+    check did not see (UTF-16 without a byte-order mark passes as UTF-8 full of NULs), so the
+    refusal that counts is made by the parser itself, before any entity can be declared or expanded.
+    """
+
+    def doctype(self, name, pubid, system):
+        raise OSError("unexpected DTD in a listing answer")
+
+
 def _parse_listing(body: bytes, prefixes: list[str], keys: list[tuple[str, int]]) -> tuple[bool, str | None]:
     """Add one page to ``prefixes`` and ``keys``; return (IsTruncated, NextContinuationToken)."""
     try:
@@ -192,7 +204,7 @@ def _parse_listing(body: bytes, prefixes: list[str], keys: list[tuple[str, int]]
     if "<!DOCTYPE" in text or "<!ENTITY" in text:      # S3 never sends a DTD: refuse entity tricks
         raise OSError("unexpected DTD in a listing answer")
     try:
-        root = ET.fromstring(text)                     # the text that was checked is the text that is parsed
+        root = ET.fromstring(text, parser=ET.XMLParser(target=_RefuseDoctype()))
     except ET.ParseError as exc:
         raise OSError(f"unreadable listing: {exc}") from exc
     if _local_name(root.tag) != "ListBucketResult":

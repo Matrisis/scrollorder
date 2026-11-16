@@ -1,10 +1,12 @@
 import time
+import tracemalloc
 import warnings
 
 import numpy as np
 import pytest
 
-from scrollorder.curves import Curve
+from scrollorder.curves import Curve, center_from_curves, curve_at_z
+from scrollorder.phantom import make_volume_phantom
 from scrollorder.paths import Paths, arc_ids, ray_hits, trace_paths
 from scrollorder.thresholds import ARC_MM
 
@@ -408,3 +410,236 @@ def test_arc_ids_refuses_non_positive_lengths():
     for px_mm, arc_mm in ((0.0, 0.5), (-0.05, 0.5), (0.05, 0.0), (0.05, -0.5), (np.nan, 0.5), (0.05, np.inf)):
         with pytest.raises(ValueError):
             arc_ids(c, px_mm, arc_mm)
+
+
+# --- ray_hits against a brute force ---------------------------------------------------------------
+
+def reference_hits(starts, dirs, xy, max_len, chunk=200):
+    """What ray_hits must return, found the long way: every ray against every segment, no tree, no sampling.
+
+    A segment is a target if both its ends are finite, it has a length, and the points beyond its ends are
+    finite too (except at the ends of the array); a ray crosses it at ``0.5 < t <= max_len`` and
+    ``-1e-9 <= s <= 1 + 1e-9``, unless it is parallel to it."""
+    starts, dirs, xy = (np.asarray(v, dtype=float) for v in (starts, dirs, xy))
+    n, finite = len(xy), np.isfinite(xy).all(axis=1)
+    targets = [i for i in range(n - 1)
+               if finite[i] and finite[i + 1] and (i == 0 or finite[i - 1]) and (i + 2 >= n or finite[i + 2])
+               and np.hypot(*(xy[i + 1] - xy[i])) > 0]
+    t_out, frac_out = np.full(len(starts), np.nan), np.full(len(starts), np.nan)
+    if not targets:
+        return t_out, frac_out
+    targets = np.array(targets)
+    a, e = xy[targets], xy[targets + 1] - xy[targets]
+    length = np.hypot(e[:, 0], e[:, 1])
+    norm = np.hypot(dirs[:, 0], dirs[:, 1])
+    usable = np.isfinite(starts).all(axis=1) & np.isfinite(dirs).all(axis=1) & (norm > 0)
+    for lo in range(0, len(starts), chunk):
+        rows = np.flatnonzero(usable[lo:lo + chunk]) + lo
+        if rows.size == 0:
+            continue
+        d, w = (dirs[rows] / norm[rows, None])[:, None, :], a[None, :, :] - starts[rows][:, None, :]
+        denom = d[..., 0] * e[None, :, 1] - d[..., 1] * e[None, :, 0]
+        across = np.abs(denom) > 1e-9 * length[None, :]
+        safe = np.where(across, denom, 1.0)
+        t = (w[..., 0] * e[None, :, 1] - w[..., 1] * e[None, :, 0]) / safe
+        s = (w[..., 0] * d[..., 1] - w[..., 1] * d[..., 0]) / safe
+        hit = across & (t > 0.5) & (t <= max_len) & (s >= -1e-9) & (s <= 1 + 1e-9)
+        t = np.where(hit, t, np.inf)
+        best = t.argmin(axis=1)
+        got = np.isfinite(t[np.arange(len(rows)), best])
+        t_out[rows[got]] = t[got, best[got]]
+        frac_out[rows[got]] = targets[best[got]] + np.clip(s[got, best[got]], 0.0, 1.0)
+    return t_out, frac_out
+
+
+def point_at(xy, frac):
+    """The points of the polyline at the fractional indices."""
+    i0 = np.minimum(np.floor(frac).astype(int), len(xy) - 2)
+    return xy[i0] + (frac - i0)[:, None] * (xy[i0 + 1] - xy[i0])
+
+
+def test_ray_hits_agrees_with_a_brute_force_on_random_polylines():
+    rng = np.random.default_rng(20261116)
+    aimed_at_vertex = aimed_hits = 0
+    for trial in range(200):
+        n = int(rng.integers(3, 41))
+        step = rng.choice([0.3, 2.0, 15.0, 120.0], size=n)                  # mixed point spacings, long jumps included
+        xy = 300.0 + np.cumsum(rng.normal(size=(n, 2)) * step[:, None], axis=0)
+        xy[rng.random(n) < 0.12] = np.nan                                    # holes
+        for i in np.flatnonzero(rng.random(n) < 0.08):                       # duplicate points: segments of length 0
+            if i > 0:
+                xy[i] = xy[i - 1]
+        finite = np.flatnonzero(np.isfinite(xy).all(axis=1))
+        if finite.size == 0:
+            continue
+        max_len = float(rng.choice([10.0, 60.0, 137.0]))
+        n_rays = 40
+        angle = rng.uniform(0, 2 * np.pi, n_rays)
+        unit = np.stack([np.cos(angle), np.sin(angle)], axis=1)
+        direction = unit * rng.uniform(0.2, 5.0, (n_rays, 1))                # not unit vectors
+        dist = rng.uniform(2.0, max_len, (n_rays, 1))
+        vertex = xy[rng.choice(finite, n_rays)]
+        pairs = finite[np.isin(finite + 1, finite)]                          # the segments with both ends finite
+        if pairs.size:
+            i = rng.choice(pairs, n_rays)
+            middle = (xy[i] + xy[i + 1]) / 2
+        else:
+            middle = vertex
+        kind = np.arange(n_rays) % 4
+        starts = np.where((kind == 0)[:, None], vertex - dist * unit,                  # aimed at a vertex
+                          np.where((kind == 1)[:, None], middle - dist * unit,           # aimed at the middle of a segment
+                                   np.where((kind == 2)[:, None], vertex,                # starting on a vertex of the curve
+                                            300.0 + rng.normal(size=(n_rays, 2)) * 60.0)))
+        t, frac = ray_hits(starts, direction, xy, max_len)
+        t_ref, frac_ref = reference_hits(starts, direction, xy, max_len)
+        np.testing.assert_array_equal(np.isnan(t), np.isnan(t_ref), err_msg=f"polyline {trial}")
+        got = np.isfinite(t)
+        np.testing.assert_allclose(t[got], t_ref[got], rtol=1e-9, atol=1e-9, err_msg=f"polyline {trial}")
+        # the same index, or (a tie between two segments that meet at a duplicated vertex) the same point
+        same_index = np.isclose(frac[got], frac_ref[got], rtol=0, atol=1e-6)
+        same_point = np.hypot(*(point_at(xy, frac[got]) - point_at(xy, frac_ref[got])).T) < 1e-6 * (1 + t[got])
+        assert (same_index | same_point).all(), f"polyline {trial}"
+        aimed_at_vertex += int((kind == 0).sum())
+        aimed_hits += int((got & (kind == 0)).sum())
+    assert aimed_hits > 0.2 * aimed_at_vertex                                # the test is not vacuous
+
+
+# --- a long segment must not cost memory ----------------------------------------------------------
+
+def test_ray_hits_with_a_long_segment_keeps_its_memory_and_its_results():
+    n_points, n_rays, max_len = 4000, 3000, 150.0
+    th = np.linspace(0, 2 * np.pi, n_points, endpoint=False)
+    xy = 1200.0 * np.stack([np.cos(th), np.sin(th)], axis=1)               # a circle, 1.9 px between points
+    xy[2000] = 1600.0 * np.array([np.cos(th[2000]), np.sin(th[2000])])     # one point 400 px out: two 400 px segments
+    angle = np.linspace(0.3 * (th[1] - th[0]), 2 * np.pi - 2 * (th[1] - th[0]), n_rays)
+    unit = np.stack([np.cos(angle), np.sin(angle)], axis=1)
+    starts = 1100.0 * unit
+    t0 = time.perf_counter()
+    t, frac = ray_hits(starts, unit, xy, max_len)
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 3.0, f"{elapsed:.2f} s"
+    t_ref, frac_ref = reference_hits(starts, unit, xy, max_len)
+    np.testing.assert_array_equal(np.isnan(t), np.isnan(t_ref))
+    got = np.isfinite(t)
+    assert got.sum() > 0.9 * n_rays
+    np.testing.assert_allclose(t[got], t_ref[got], rtol=1e-9, atol=1e-9)
+    np.testing.assert_allclose(frac[got], frac_ref[got], rtol=0, atol=1e-6)
+    tracemalloc.start()
+    try:
+        again = ray_hits(starts, unit, xy, max_len)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 150e6, f"{peak / 1e6:.0f} MB"                                # 2.5 GB when the radius followed the long segment
+    np.testing.assert_array_equal(again[0], t)
+    np.testing.assert_array_equal(again[1], frac)
+
+
+# --- arguments --------------------------------------------------------------------------------------
+
+def test_ray_hits_refuses_arrays_of_the_wrong_shape():
+    line = lines([10.0], n=21)[0].xy
+    up, down = np.array([[3.0, 0.0]] * 4), np.array([[0.0, 1.0]] * 4)
+    for bad in (np.zeros((4, 3)), np.zeros(8), np.zeros((2, 2, 2)), np.zeros((4, 4))):      # (4, 3) has an even size
+        with pytest.raises(ValueError, match="starts"):
+            ray_hits(bad, down, line, 30.0)
+        with pytest.raises(ValueError, match="dirs"):
+            ray_hits(up, bad, line, 30.0)
+        with pytest.raises(ValueError, match="curve_xy"):
+            ray_hits(up, down, bad, 30.0)
+    with pytest.raises(ValueError, match="one row per ray"):
+        ray_hits(up, down[:3], line, 30.0)
+    t, _ = ray_hits(np.zeros(0), np.zeros((0, 2)), line, 30.0)               # an empty array of any shape is no ray
+    assert t.shape == (0,)
+    t, _ = ray_hits(up, down, np.zeros(0), 30.0)                              # nor a curve
+    assert np.isnan(t).all()
+
+def test_max_len_must_be_finite_and_longer_than_the_smallest_accepted_distance():
+    line = lines([10.0], n=21)[0].xy
+    up, down = np.array([[3.0, 0.0]]), np.array([[0.0, 1.0]])
+    for bad in (np.inf, -np.inf, np.nan, 0.0, -1.0, 0.3, 0.5):
+        with pytest.raises(ValueError, match="max_len"):
+            ray_hits(up, down, line, bad)
+        with pytest.raises(ValueError, match="max_len"):
+            trace_paths(lines([0.0, 12.0]), 0, BELOW, 1, bad)
+    with pytest.raises(ValueError, match="0.5"):                              # the reason is in the message
+        ray_hits(up, down, line, 0.3)
+    t, _ = ray_hits(up, down, line, 10.0)
+    assert t[0] == pytest.approx(10.0)
+
+
+# --- the sheets a path has entered must not be crossed twice before its end ----------------------------
+
+def zfold(ys=(12.0, 15.0, 18.0), width=20.0):
+    """A curve that runs along y = ys[0] from x = 0 to width, steps to ys[1] and comes back, steps to ys[2] and
+    goes again: a ray going up between x = 0 and x = width crosses it at each of the heights."""
+    points = []
+    for i, y in enumerate(ys):                                              # right, then left, then right again
+        points += [(0.0, y), (width, y)] if i % 2 == 0 else [(width, y), (0.0, y)]
+    xy = np.array(points, dtype=float)
+    return Curve("z", xy, np.arange(len(xy)) * 0.1, np.tile([0.0, 1.0, 0.0], (len(xy), 1)))
+
+
+def statuses(p, xs):
+    rows = rows_by_point(p)
+    return {x: list(p.status[rows[x]]) for x in xs}
+
+
+def test_a_fold_of_the_next_sheet_makes_the_column_that_goes_past_it_self():
+    ls = lines([0.0, 40.0, 60.0])
+    p = trace_paths([ls[0], zfold(), ls[1], ls[2]], 0, BELOW, 3, 100.0)    # sheet 1 is met at 12, 15 and 18
+    for x, status in statuses(p, range(2, 19)).items():
+        assert status == ["ok", "self", "self"], x                          # m = 1 is fine, m = 2 crosses sheet 1 twice
+    rows = [rows_by_point(p)[x] for x in range(2, 19)]
+    np.testing.assert_allclose(p.t[rows, 0], 12.0)
+    assert np.isnan(p.t[rows, 1:]).all()
+
+def test_a_second_crossing_after_the_end_of_the_column_does_not_matter_to_it():
+    ls = lines([0.0, 14.0, 60.0])
+    p = trace_paths([ls[0], zfold(), ls[1], ls[2]], 0, BELOW, 3, 100.0)    # sheet 1 at 12, 15 and 18, sheet 2 at 14
+    for x, status in statuses(p, range(2, 19)).items():
+        assert status == ["ok", "ok", "self"], x                            # 15 is after 14, but before 60
+
+def test_two_crossings_of_a_sheet_less_than_half_a_pixel_apart_are_one_crossing():
+    ls = lines([0.0, 40.0])
+    p = trace_paths([ls[0], zfold(ys=(12.0, 12.3)), ls[1]], 0, BELOW, 2, 100.0)
+    for x, status in statuses(p, range(2, 19)).items():
+        assert status == ["ok", "ok"], x
+
+def test_a_sheet_crossed_twice_beyond_half_a_pixel_is_self_from_the_next_column_on():
+    ls = lines([0.0, 40.0])
+    p = trace_paths([ls[0], zfold(ys=(12.0, 12.8)), ls[1]], 0, BELOW, 2, 100.0)
+    for x, status in statuses(p, range(2, 19)).items():
+        assert status == ["ok", "self"], x
+
+def test_the_start_curve_is_the_zeroth_sheet_of_the_rule():
+    cs = lines([0.0, 12.0, 26.0])
+    cs[0].xy[20] = [14.0, 40.0]                                              # the spike of the earlier test
+    p = trace_paths(cs, 0, BELOW, 2, 60.0)
+    assert statuses(p, [17]) == {17: ["ok", "self"]} and statuses(p, [18]) == {18: ["self", "self"]}
+
+def test_no_false_self_on_clean_circles():
+    for k in (0, 1, 2):
+        p = trace_paths(circles([50, 62, 74, 86, 98]), k, (200, 200), 4 - k, 80.0)
+        assert (p.status == "ok").all()
+
+def test_clean_rings_of_the_volume_phantoms_give_only_ok_paths():
+    for ph in (make_volume_phantom(), make_volume_phantom(join_winding=None)):
+        curves = [Curve(f"w{k}", *curve_at_z(*surface, 6.0, 0.05)) for k, surface in enumerate(ph["surfaces"])]
+        centre = center_from_curves(curves)
+        for k in range(4):
+            p = trace_paths(curves, k, centre, 4, 80.0)
+            assert len(p.point_index) == 720
+            assert (p.status == "ok").all(), (k, np.unique(p.status, return_counts=True))
+            assert (np.diff(p.t, axis=1) > 0).all()
+
+
+def test_a_run_that_is_exactly_whole_arcs_long_drops_its_last_point():
+    ten_px = 0.05, 0.5                                                      # 10 px per arc
+    assert arc_ids(lines([0.0], n=11)[0], *ten_px).tolist() == [0] * 10 + [-1]          # 10 px long: one arc
+    assert arc_ids(lines([0.0], n=21)[0], *ten_px).tolist() == [0] * 10 + [1] * 10 + [-1]
+    assert arc_ids(lines([0.0], n=10)[0], *ten_px).tolist() == [-1] * 10                # 9 px: no arc at all
+
+def test_the_point_at_exactly_an_arc_length_opens_the_next_arc():
+    ids = arc_ids(lines([0.0], n=25)[0], 0.05, 0.5)
+    assert ids[9] == 0 and ids[10] == 1 and ids[19] == 1 and ids[20] == -1

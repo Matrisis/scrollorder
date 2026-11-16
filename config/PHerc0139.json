@@ -1,0 +1,191 @@
+{
+  "sample": "PHerc0139",
+  "voxel_mm": 0.002399,
+  "volume": {
+    "group": "PHerc0139/volumes/20260102150214-2.399um-0.2m-78keV-masked.zarr",
+    "levels": {
+      "0": "0",
+      "1": "1",
+      "2": "2",
+      "3": "3",
+      "4": "4",
+      "5": "5"
+    },
+    "axes": "zyx"
+  },
+  "pyramid": "mean",
+  "segments": [
+    {
+      "name": "w023",
+      "prefix": "PHerc0139/segments/20260311000000-w023_202603112281/mesh/20260311000000-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w024",
+      "prefix": "PHerc0139/segments/20260215000000-w024_2026021572/mesh/20260215000000-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w025",
+      "prefix": "PHerc0139/segments/20250108000000-w025_2025010863/mesh/20250108000000-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w026",
+      "prefix": "PHerc0139/segments/20250108000001-w026_2025010854/mesh/20250108000001-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w027",
+      "prefix": "PHerc0139/segments/20250108000002-w027_2025010845/mesh/20250108000002-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w028",
+      "prefix": "PHerc0139/segments/20250108000003-w028_2025010836/mesh/20250108000003-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w029",
+      "prefix": "PHerc0139/segments/20250108000004-w029_2025010827/mesh/20250108000004-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w030",
+      "prefix": "PHerc0139/segments/20250108000005-w030_2025010818/mesh/20250108000005-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w031",
+      "prefix": "PHerc0139/segments/20260130000000-w031_2026013019/mesh/20260130000000-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w032",
+      "prefix": "PHerc0139/segments/20260203000000-w032_2026020303/mesh/20260203000000-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w033",
+      "prefix": "PHerc0139/segments/20260219000000-w033_2026021913/mesh/20260219000000-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w034",
+      "prefix": "PHerc0139/segments/20260303000000-w034_2026030317/mesh/20260303000000-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w035",
+      "prefix": "PHerc0139/segments/20260317000000-w035_2026031718/mesh/20260317000000-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w036",
+      "prefix": "PHerc0139/segments/20260316000000-w036_2026031607/mesh/20260316000000-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w037",
+      "prefix": "PHerc0139/segments/20260310000000-w037_2026031015/mesh/20260310000000-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w038",
+      "prefix": "PHerc0139/segments/20260306000000-w038_2026030608/mesh/20260306000000-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w039",
+      "prefix": "PHerc0139/segments/20260302000000-w039_2026030210/mesh/20260302000000-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w040",
+      "prefix": "PHerc0139/segments/20250831000000-w040_2025083102/mesh/20250831000000-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w041",
+      "prefix": "PHerc0139/segments/20260108000000-w041_2026010816/mesh/20260108000000-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w042",
+      "prefix": "PHerc0139/segments/20260206000000-w042_2026020613/mesh/20260206000000-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w043",
+      "prefix": "PHerc0139/segments/20260112000000-w043_2026011217/mesh/20260112000000-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w044",
+      "prefix": "PHerc0139/segments/20260115000000-w044_2026011522/mesh/20260115000000-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w045",
+      "prefix": "PHerc0139/segments/20260126000000-w045_2026012619/mesh/20260126000000-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w046",
+      "prefix": "PHerc0139/segments/20260325000000-w046_20260325/mesh/20260325000000-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w047",
+      "prefix": "PHerc0139/segments/20260206000001-w047_2026020613/mesh/20260206000001-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w048",
+      "prefix": "PHerc0139/segments/20260219000001-w048_2026021912/mesh/20260219000001-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w049",
+      "prefix": "PHerc0139/segments/20260318000000-w049_20260318/mesh/20260318000000-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w050",
+      "prefix": "PHerc0139/segments/20260302000001-w050_2026030220/mesh/20260302000001-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w051",
+      "prefix": "PHerc0139/segments/20260306000001-w051_2026030600/mesh/20260306000001-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w052",
+      "prefix": "PHerc0139/segments/20260227000000-w052_2026022705/mesh/20260227000000-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w053",
+      "prefix": "PHerc0139/segments/20260220000000-w053_2026022021/mesh/20260220000000-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w054",
+      "prefix": "PHerc0139/segments/20260206000002-w054_2026020617/mesh/20260206000002-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w055",
+      "prefix": "PHerc0139/segments/20251226000000-w055_2025122611/mesh/20251226000000-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w056",
+      "prefix": "PHerc0139/segments/20260115000001-w056_2026011514/mesh/20260115000001-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w057",
+      "prefix": "PHerc0139/segments/20260127000000-w057_2026012713/mesh/20260127000000-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w058",
+      "prefix": "PHerc0139/segments/20260210000000-w058_2026021020/mesh/20260210000000-on-20260102150214-2.399um.tifxyz/"
+    },
+    {
+      "name": "w059",
+      "prefix": "PHerc0139/segments/20250223000000-w059_2025022312/mesh/20250223000000-on-20260102150214-2.399um.tifxyz/"
+    }
+  ],
+  "tifxyz_to_l0": 1.0,
+  "umbilicus": "PHerc0139/representations/umbilicus/20260102150214-umbilicus-20260826112529.json",
+  "lasagna": {
+    "level": 2,
+    "grad_scale": 1000.0,
+    "channels": {
+      "grad_mag": {
+        "key": "PHerc0139/representations/predictions/lasagna/20260102150214-lasagna-20260419180421-L2/PHerc0139-20260102150214-lasagna-20260724_grad_mag.ome.zarr/4",
+        "index": null
+      },
+      "cos": {
+        "key": "PHerc0139/representations/predictions/lasagna/20260102150214-lasagna-20260419180421-L2/PHerc0139-20260102150214-lasagna-20260724_cos.ome.zarr/3",
+        "index": null
+      }
+    }
+  },
+  "volume_9um": {
+    "pag0": "PHerc0139/volumes/20251107132835-9.362um-1.2m-113keV-pag0-masked.zarr/0",
+    "pag50": "PHerc0139/volumes/20251107135911-9.362um-1.2m-113keV-pag50-masked.zarr/0"
+  },
+  "kollesis": null,
+  "recto_offset_px": 0.0,
+  "mass_from_l0": false,
+  "overlay_ok": null
+}

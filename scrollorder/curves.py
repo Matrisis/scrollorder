@@ -147,9 +147,11 @@ def curves_for_slice(tifxyz_dirs: list[Path], names: list[str], sl: SliceImage, 
 
     The coordinates of each folder are multiplied by ``cfg.tifxyz_to_l0``, cut at ``sl.z_l0``, moved to
     the level of the slice (``l0_to_level``) and shifted by ``sl.origin_xy``.  ``u_mm`` counts the grid
-    step along the columns as ``cfg.voxel_mm / scale[0]`` of ``meta.json`` (``scale[1]`` if the grid is
-    stored transposed).  ``tifxyz_to_l0`` is left out of that step because it is 1.0 for the data of
-    wave 1 (to revisit if it ever is not).
+    step along the columns as ``cfg.voxel_mm * cfg.tifxyz_to_l0 / scale[0]`` of ``meta.json``
+    (``scale[1]`` if the grid is stored transposed): the grid has one point every ``1 / scale`` tifxyz
+    units, a tifxyz unit is ``tifxyz_to_l0`` level-0 voxels (the factor that is applied to the
+    coordinates), and a level-0 voxel is ``voxel_mm`` long.  With ``tifxyz_to_l0 = 1.0``, the value
+    for the data of wave 1, this is the plain ``cfg.voxel_mm / scale``.
     """
     if len(tifxyz_dirs) != len(names):
         raise ValueError(f"{len(tifxyz_dirs)} folders but {len(names)} names")
@@ -162,7 +164,7 @@ def curves_for_slice(tifxyz_dirs: list[Path], names: list[str], sl: SliceImage, 
         folder = Path(folder)
         scale = _read_scale(folder)
         x, y, z, usable, transposed = _oriented(*read_tifxyz(folder))
-        u_step_mm = cfg.voxel_mm / scale[1 if transposed else 0]
+        u_step_mm = cfg.voxel_mm * factor / scale[1 if transposed else 0]
         xy, u_mm, normal = _cut(x, y, z, usable, sl.z_l0 / factor, u_step_mm)
         xy = l0_to_level(xy * factor, sl.level, cfg.pyramid) - origin
         curves.append(Curve(name, xy, u_mm, normal))

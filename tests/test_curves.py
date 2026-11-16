@@ -171,7 +171,9 @@ def test_curve_at_z_is_fast_on_a_real_sized_grid():
         start = time.perf_counter()
         xy, u, n = curve_at_z(x, y, z, valid, 13_000.5, 0.05)
         best = min(best, time.perf_counter() - start)
-    assert best < 0.5, f"curve_at_z took {best:.3f} s"
+    # 6 to 9 ms measured; a per-column loop that also builds the normals takes 0.10 to 0.12 s here, so
+    # 0.05 s still has 5x of room for a slow machine (best of 3 absorbs a hiccup) and would catch that loop
+    assert best < 0.05, f"curve_at_z took {best:.3f} s"
     assert xy.shape == (n_cols, 2) and u.shape == (n_cols,) and n.shape == (n_cols, 3)
     pair_ok = valid[650] & valid[651]                       # z = 13000 on row 650, 13020 on row 651
     found = np.isfinite(xy[:, 0])
@@ -322,6 +324,21 @@ def test_curves_for_slice_multiplies_by_tifxyz_to_l0(tmp_path, cfg):
         np.testing.assert_allclose(xy, 2.0 * (truth + [3.0 * row, 0.0]), atol=1e-3)
     same = curves_for_slice([folder], ["w"], _slice(z_l0=25.0), cfg)[0].xy         # factor 1: z = 25 is row 7.5
     np.testing.assert_allclose(same, truth + [3.0 * 7.5, 0.0], atol=1e-3)
+
+
+def test_curves_for_slice_u_step_in_mm_follows_tifxyz_to_l0_and_the_scale_axis(tmp_path, cfg):
+    x, y, z, _ = _cylinder()
+    scale = (0.05, 0.1)                                     # not square: which entry is used shows in the step
+    straight = write_tifxyz(tmp_path / "a", x, y, z, scale=scale)
+    transposed = write_tifxyz(tmp_path / "b", x.T, y.T, z.T, scale=scale)
+    cfg2 = dataclasses.replace(cfg, tifxyz_to_l0=2.0)       # a grid step is 1 / scale tifxyz units = 2 / scale voxels
+    a, b = curves_for_slice([straight, transposed], ["a", "b"], _slice(z_l0=50.0), cfg2)
+    columns = np.arange(181)
+    np.testing.assert_allclose(a.u_mm, columns * (0.002399 * 2.0 / 0.05), rtol=1e-12)      # scale[0] along the columns
+    np.testing.assert_allclose(b.u_mm, columns * (0.002399 * 2.0 / 0.1), rtol=1e-12)       # scale[1]: transposed grid
+    one_a, one_b = curves_for_slice([straight, transposed], ["a", "b"], _slice(z_l0=25.0), cfg)    # factor 1.0
+    np.testing.assert_allclose(one_a.u_mm, columns * (0.002399 / 0.05), rtol=1e-12)
+    np.testing.assert_allclose(one_b.u_mm, columns * (0.002399 / 0.1), rtol=1e-12)
 
 
 def test_curves_for_slice_moves_to_the_level_and_the_window(tmp_path, cfg):

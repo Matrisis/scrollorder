@@ -256,48 +256,143 @@ def test_a_folded_band_is_a_discard_and_a_clean_one_is_not():
     assert np.isfinite(band_mass(rho, inner, tilted))
 
 
-def test_the_folded_bands_of_the_join_flank_are_discarded_not_miscounted():
-    # the reviewer's case: on the default phantom the normals of curve 4 converge where it bends at the
-    # flank of the join, the arrival points of arcs 27 and 45 at m = 3 fold back; the band gave 2 for 3
-    ph = make_volume_phantom()
+# --- "ok" means every field is finite; a degenerate band is "band_nan" ---------------------------
+
+def _slice_of(ph):
     img = SliceImage(ph["volume"][6].astype(np.float32), (0, 0), 0, 6, 6.0, ph["px_mm"])
     curves = [Curve(f"w{k}", *curve_at_z(*s, 6.0, 0.05)) for k, s in enumerate(ph["surfaces"])]
-    meas = measure_slice(img, curves, center_from_curves(curves), m_max=4)
-    for arc in (27, 45):
-        r = row_of(meas, 4, arc, 3)
-        assert r["status"] == "ok" and round(r["mass"] / meas.sigma_ref0) == 3 and np.isnan(r["band_mass"])
-    ok = [r for r in meas.rows if r["status"] == "ok"]
-    finite = [r for r in ok if np.isfinite(r["band_mass"])]
-    assert all(round(r["band_mass"] / meas.sigma_ref0) == round(r["mass"] / meas.sigma_ref0) for r in finite)
-    assert len(ok) - len(finite) <= 10
+    return img, curves
 
 
-def test_ok_guarantees_a_finite_mass_but_not_a_finite_band_mass():
-    ph, img, curves = phantom_slice()
+def one_point_arc(curves, img):
+    """Point 200 of curve 1 moved 12 px along its ring (> ARC_MM = 10 px from both neighbours): an arc of
+    one point.  Returns the new curves and the number of that arc."""
+    curves = list(curves)
     centre = np.array(center_from_curves(curves))
-    # a one-point arc: point 200 of curve 1 moved 12 px along its ring (> ARC_MM = 10 px from both neighbours)
     xy = curves[1].xy.copy()
     radius = np.hypot(*(xy[200] - centre))
     angle = np.arctan2(xy[200, 1] - centre[1], xy[200, 0] - centre[0]) + 12.0 / radius
     xy[200] = centre + radius * np.array([np.cos(angle), np.sin(angle)])
     curves[1] = Curve(curves[1].name, xy, curves[1].u_mm, curves[1].normal3d)
-    lone = arc_ids(curves[1], img.px_mm)[200]
+    lone = int(arc_ids(curves[1], img.px_mm)[200])
     assert (arc_ids(curves[1], img.px_mm) == lone).sum() == 1
-    # a NaN pixel inside sheet 0 at theta = pi / 2 (middle of arc 4): the profiles through it are invalid,
-    # the others are not
+    return curves, lone
+
+
+def nan_pixel(img, curves):
+    """A NaN pixel inside sheet 0 at theta = pi / 2 (middle of arc 4 of curve 0)."""
+    cx, cy = center_from_curves(curves)
     data = img.data.copy()
-    data[int(centre[1]) + 32, int(centre[0])] = np.nan
-    holed = SliceImage(data, img.origin_xy, img.level, img.plane, img.z_l0, img.px_mm)
-    meas = measure_slice(holed, curves, tuple(centre), m_max=2)
+    data[int(cy) + 32, int(cx)] = np.nan
+    return SliceImage(data, img.origin_xy, img.level, img.plane, img.z_l0, img.px_mm)
+
+
+@pytest.fixture(scope="module")
+def many_measures():
+    out = {}
+    ph = make_volume_phantom(join_winding=None)
+    img, curves = _slice_of(ph)
+    centre = center_from_curves(curves)
+    out["no join"] = measure_slice(img, curves, centre, m_max=4)
+    out["constant grey"] = measure_slice(img, curves, centre, m_max=2, constant_grey=True)
+    lone_curves, lone = one_point_arc(curves, img)
+    out["one-point arc"] = measure_slice(img, lone_curves, centre, m_max=2)
+    out["nan pixel"] = measure_slice(nan_pixel(img, curves), curves, centre, m_max=2)
+    default = make_volume_phantom()
+    img_d, curves_d = _slice_of(default)
+    out["default"] = measure_slice(img_d, curves_d, center_from_curves(curves_d), m_max=4)
+    holed = make_volume_phantom(join_winding=None)
+    holed["surfaces"][2][3][:, 300:420] = False                  # a hole in curve 2
+    img_h, curves_h = _slice_of(holed)
+    out["hole"] = measure_slice(img_h, curves_h, center_from_curves(curves_h), m_max=4)
+    noisy = make_volume_phantom(join_winding=None, noise=8.0, seed=1)
+    img_n, curves_n = _slice_of(noisy)
+    out["noise"] = measure_slice(img_n, curves_n, center_from_curves(curves_n), m_max=4)
+    return out, lone
+
+
+def test_an_ok_row_has_no_nan_in_any_field(many_measures):
+    measures, _ = many_measures
+    for name, meas in measures.items():
+        ok = [r for r in meas.rows if r["status"] == "ok"]
+        assert ok, name
+        for r in ok:
+            for key in ROW_KEYS_EXTENDED:
+                if key in ("status", "motif"):
+                    continue
+                values = r[key] if key == "u_path" else [r[key]]
+                assert len(values) > 0 and all(np.isfinite(float(v)) for v in values), (name, key, r)
+    assert any(r["status"] == "short" for r in measures["hole"].rows)        # the hole is a discard
+    assert np.isfinite(measures["noise"].sigma_ref0)       # its bias under noise is the plan owner's (air)
+
+
+def test_every_row_has_one_of_the_four_statuses_and_band_nan_keeps_a_valid_mass(many_measures):
+    measures, _ = many_measures
+    assert mass.MASS_VALID_STATUSES == ("ok", "band_nan")
+    for name, meas in measures.items():
+        assert {r["status"] for r in meas.rows} <= {"ok", "band_nan", "short", "inclined"}, name
+        for r in meas.rows:
+            if r["status"] == "band_nan":
+                assert np.isnan(r["band_mass"]) and r["motif"] == "", (name, r)
+                assert np.isfinite([r["mass"], r["spacing_px"], r["c"], r["theta"], r["u_mm"], *r["u_path"]]).all()
+            if r["status"] in ("short", "inclined"):
+                assert np.isnan([r["mass"], r["band_mass"], r["spacing_px"]]).all(), (name, r)
+
+
+def test_the_two_reproductions_are_band_nan_with_a_finite_mass(many_measures):
+    measures, lone = many_measures
+    meas = measures["one-point arc"]
     for m in (1, 2):
         r = row_of(meas, 1, lone, m)
-        assert r["status"] == "ok" and r["n_profiles"] == 1 and np.isfinite(r["mass"]) and np.isnan(r["band_mass"])
-    pixel = [r for r in meas.rows if r["k"] == 0 and r["status"] == "ok" and np.isnan(r["band_mass"])]
-    assert pixel and all(r["n_profiles"] > 1 and np.isfinite(r["mass"]) for r in pixel)
-    # what the docstring of SliceMeasure states, on every "ok" row
-    for r in meas.rows:
-        if r["status"] == "ok":
-            assert np.isfinite([r["mass"], r["spacing_px"], r["c"]]).all() and r["c"] >= MIN_INCLINATION
+        assert r["status"] == "band_nan" and r["n_profiles"] == 1
+        assert round(r["mass"] / meas.sigma_ref0) == m
+    meas = measures["nan pixel"]
+    pixel = [r for r in meas.rows if r["k"] == 0 and r["status"] == "band_nan"]
+    assert pixel and all(r["n_profiles"] > 1 and round(r["mass"] / meas.sigma_ref0) == r["m"] for r in pixel)
+    assert {r["arc"] for r in pixel} == {4}
+
+
+def test_the_folded_bands_of_the_join_flank_are_band_nan_not_miscounted(many_measures):
+    # the reviewer's case: on the default phantom the normals of curve 4 converge where it bends at the
+    # flank of the join, the arrival points of arcs 27 and 45 at m = 3 fold back; the band gave 2 for 3
+    measures, _ = many_measures
+    meas = measures["default"]
+    for arc in (27, 45):
+        r = row_of(meas, 4, arc, 3)
+        assert r["status"] == "band_nan" and round(r["mass"] / meas.sigma_ref0) == 3 and np.isnan(r["band_mass"])
+    ok = [r for r in meas.rows if r["status"] == "ok"]
+    assert all(round(r["band_mass"] / meas.sigma_ref0) == round(r["mass"] / meas.sigma_ref0) for r in ok)
+    assert sum(r["status"] == "band_nan" for r in meas.rows) <= 10
+    assert not any(r["status"] == "band_nan" for r in measures["no join"].rows)
+
+
+def test_band_nan_rows_count_in_the_mass_reference(monkeypatch):
+    # every band made NaN by hand: all the rows become "band_nan", the mass reference does not move
+    ph, img, curves = phantom_slice()
+    centre = center_from_curves(curves)
+    reference = measure_slice(img, curves, centre, m_max=2)
+    monkeypatch.setattr(mass, "band_mass", lambda *args: float("nan"))
+    meas = measure_slice(img, curves, centre, m_max=2)
+    assert {r["status"] for r in meas.rows} == {"band_nan"}
+    assert meas.sigma_ref0 == reference.sigma_ref0 and meas.s_clean == reference.s_clean
+    assert [r["clean"] for r in meas.rows] == [r["clean"] for r in reference.rows]
+    assert [r["mass"] for r in meas.rows] == [r["mass"] for r in reference.rows]
+
+
+def test_a_mass_chain_field_that_is_not_finite_makes_the_row_short():
+    # u_mm missing at the middle point of arc 3 of curve 0 (that point then starts no path): its rows have
+    # no u_mm, so they are not a measure
+    ph, img, curves = phantom_slice()
+    ids = arc_ids(curves[0], img.px_mm)
+    idx = np.flatnonzero(ids == 3)
+    u = curves[0].u_mm.astype(float).copy()
+    u[idx[len(idx) // 2]] = np.nan
+    curves[0] = Curve(curves[0].name, curves[0].xy, u, curves[0].normal3d)
+    meas = measure_slice(img, curves, center_from_curves(curves), m_max=2)
+    for m in (1, 2):
+        r = row_of(meas, 0, 3, m)
+        assert r["status"] == "short" and r["motif"] == "" and np.isnan(r["u_mm"])
+        assert np.isnan([r["mass"], r["band_mass"], r["spacing_px"]]).all() and not r["clean"]
 
 
 # --- the measure of the phantom ---------------------------------------------------------------
@@ -363,7 +458,7 @@ def test_profiles_hold_what_t0_and_t1_need(ph_measure):
 
 def test_clean_rows_sigma_ref0_and_s_clean_follow_their_definitions(ph_measure):
     _, meas = ph_measure
-    m1 = rows(meas, 1)
+    m1 = [r for r in meas.rows if r["m"] == 1 and r["status"] in mass.MASS_VALID_STATUSES]
     median = np.median([r["spacing_px"] for r in m1])
     assert all(r["clean"] == (r["spacing_px"] > median) for r in m1)
     assert not any(r["clean"] for r in meas.rows if r["m"] > 1)

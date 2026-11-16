@@ -11,6 +11,19 @@ The integral is the trapezoid rule on the samples ``s_j = j * step`` up to ``t``
 trapezoid from the last sample to the exact endpoint ``t`` (``rho`` at ``t`` is interpolated linearly
 between the two samples around it).  No sample beyond the one that follows ``t`` is ever read, and the
 same estimator is used for every mass of this module.
+
+Status of a row (one per arc and ``m``):
+
+- ``"ok"``: every field is finite (``theta``, ``u_mm``, ``c``, ``spacing_px``, ``mass``, ``band_mass`` and each
+  entry of ``u_path``); the mass and the band variant can both be scored;
+- ``"band_nan"``: the mass is valid (every field finite but ``band_mass``), the band polygon is degenerate,
+  folds or covers a NaN pixel (see ``band_mass``); the mass is scored, the band is a discard;
+- ``"short"``: fewer than ``MIN_VALID_PROFILE_SHARE`` of the profiles of the arc are valid (or a field of
+  the mass chain is not finite);
+- ``"inclined"``: the median inclination is below ``MIN_INCLINATION``.
+
+``MASS_VALID_STATUSES = ("ok", "band_nan")`` are the rows whose mass is valid: the mass reference
+(``clean``, ``sigma_ref0``, ``s_clean``) is built on them, so a degenerate band never moves it.
 """
 from __future__ import annotations
 
@@ -32,9 +45,12 @@ AIR_EDGE_PX = 1.0               # the void level of a profile is looked for in [
 MOTIFS = ("hole", "self", "order")         # why a profile is invalid; a tie goes to the first one
 _AIR_ROWS_PER_CHUNK = 4096      # profiles held at once in the moving means of air_map
 
+# the keys of a row; "status" is "ok" (every field finite), "band_nan" (valid mass, degenerate band),
+# "short" or "inclined" (see the module docstring)
 ROW_KEYS = ("k", "arc", "m", "theta", "u_mm", "c", "spacing_px", "mass", "band_mass", "n_profiles", "status",
             "clean", "u_path")
 ROW_KEYS_EXTENDED = ROW_KEYS + ("motif",)
+MASS_VALID_STATUSES = ("ok", "band_nan")       # the rows whose mass is valid (the band may not be)
 
 
 @dataclass(eq=False)
@@ -42,10 +58,11 @@ class SliceMeasure:
     """What ``measure_slice`` measures on one slice.
 
     ``rows``: one dict per (curve ``k``, arc, ``m``), keys ``ROW_KEYS_EXTENDED``, plain Python values.
-    A row with ``status == "ok"`` guarantees a finite ``mass``, ``spacing_px`` and ``c`` (>= ``MIN_INCLINATION``),
-    NOT a finite ``band_mass``: the band variant is NaN where its polygon is degenerate (an arc of one point),
-    folds (see ``band_mass``) or covers a NaN pixel.  A consumer of ``band_mass`` scores it only where it is
-    finite and counts the other "ok" rows as band discards.
+    A row with ``status == "ok"`` has no NaN in any field (``u_path`` entries included), with ``c >=
+    MIN_INCLINATION``.  A ``"band_nan"`` row has the same guarantee except for ``band_mass``, which is NaN
+    (degenerate polygon such as an arc of one point, folded polygon, NaN pixel: see ``band_mass``).  Mass
+    scoring uses the rows of ``MASS_VALID_STATUSES``, band scoring the "ok" rows only.  "short" and
+    "inclined" rows have NaN ``spacing_px``, ``mass`` and ``band_mass``.
     ``profiles[k]`` (for each curve that starts paths, ``k < len(curves) - 1``): ``"grey"`` (P, S) float32,
     the raw grey along each path (NaN outside the image; 1 in control mode), ``"t"`` and ``"c"``
     (P, m_max) the distance to the crossing with the curve ``k + j + 1`` and the inclination of the path
@@ -411,6 +428,9 @@ def _arc_rows(k, m, data: _Curve, theta, u_mm):
             status = "inclined"
         else:
             status = "ok"
+            chain = np.r_[theta[a], u_mm[a], c_med[a], spacing[a], u_path[a]]
+            if not np.isfinite(chain).all():
+                status = "short"            # a field of the mass chain is missing: not a measure (motif "")
         motif = ""
         if status == "short" and motif_counts[a].max() > 0:
             motif = MOTIFS[int(motif_counts[a].argmax())]
@@ -439,17 +459,18 @@ def measure_slice(img: SliceImage, curves: list[Curve], center_xy, m_max: int = 
        ``theta`` and ``u_mm`` those of the middle point of the arc on the curve ``k``.  The row is
        ``"short"`` if fewer than ``MIN_VALID_PROFILE_SHARE`` of its profiles are valid (``motif``: the most
        frequent of "hole", "self", "order" among the others, "" if none), else ``"inclined"`` if ``c`` is
-       below ``MIN_INCLINATION``, else ``"ok"``.  Only the "ok" rows get ``spacing_px``, ``mass`` and
-       ``band_mass`` (NaN otherwise).  An "ok" row always has a finite ``mass`` and ``spacing_px``; its
-       ``band_mass`` may still be NaN (degenerate or folded polygon, NaN pixel: see ``band_mass``), and the
-       status does not depend on it.
-    4. Clean rows: the "ok" ``m = 1`` rows whose spacing exceeds the median spacing of the "ok" ``m = 1``
-       rows of the slice.  The air map comes from their valid profiles (``air_map``, tiles of
+       below ``MIN_INCLINATION``, else mass-valid.  A would-be mass-valid row with a non-finite ``theta``,
+       ``u_mm``, ``c``, ``spacing_px`` or ``u_path`` entry (or, later, ``mass``) is ``"short"`` with motif "".
+       Only the mass-valid rows get ``spacing_px``, ``mass`` and ``band_mass`` (NaN otherwise).
+    4. Clean rows: the mass-valid ``m = 1`` rows whose spacing exceeds the median spacing of the mass-valid
+       ``m = 1`` rows of the slice.  The air map comes from their valid profiles (``air_map``, tiles of
        ``AIR_TILE_MM``); ``ValueError`` if there is none.
     5. Masses: ``rho`` = grey minus the air at each sample, profile mass = ``c`` times its integral to
        ``t`` (``integrate_profiles``), row mass = median over the valid profiles; ``band_mass`` on the
        image ``rho`` between the points of the arc on the curve ``k`` and the ends of its valid paths.
-       ``sigma_ref0`` and ``s_clean``: medians of the masses and spacings of the clean rows.
+       A mass-valid row whose ``band_mass`` is NaN becomes ``"band_nan"``, the others stay ``"ok"``: an
+       "ok" row has no NaN in any field.  ``sigma_ref0`` and ``s_clean``: medians of the masses and
+       spacings of the clean rows (``MASS_VALID_STATUSES``: the band never moves the mass reference).
 
     With ``constant_grey`` the grey is 1 wherever it was sampled (NaN stays NaN) and the air is 0: the
     negative control, through the same paths, arcs, estimator and definitions.
@@ -486,7 +507,8 @@ def measure_slice(img: SliceImage, curves: list[Curve], center_xy, m_max: int = 
         profiles[k] = {"grey": grey, "t": p.t, "c": c, "arc": arc, "start_xy": p.start_xy, "nu": p.nu}
 
     # clean rows, then the air from their profiles
-    ok_m1 = [row for d in per_curve.values() for row in d.rows if row["m"] == 1 and row["status"] == "ok"]
+    ok_m1 = [row for d in per_curve.values() for row in d.rows
+             if row["m"] == 1 and row["status"] in MASS_VALID_STATUSES]
     if not ok_m1:
         raise ValueError("no clean arc: no arc of the slice has a valid 1-sheet measure")
     median_m1 = float(np.median([row["spacing_px"] for row in ok_m1]))
@@ -506,7 +528,7 @@ def measure_slice(img: SliceImage, curves: list[Curve], center_xy, m_max: int = 
         _fill_masses(k, data, profiles[k], air, rho_img, constant_grey)
 
     rows = [row for k in sorted(per_curve) for row in per_curve[k].rows]
-    clean = [row for row in rows if row["clean"]]
+    clean = [row for row in rows if row["clean"] and row["status"] in MASS_VALID_STATUSES]
     if not clean:
         raise ValueError("no clean arc: no valid 1-sheet arc of the slice is wider than the median spacing")
     sigma_ref0 = float(np.median([row["mass"] for row in clean]))
@@ -536,7 +558,7 @@ def _air_of_clean_arcs(img, per_curve, profiles, max_len) -> np.ndarray:
 
 
 def _fill_masses(k, data: _Curve, prof, air, rho_img, constant_grey) -> None:
-    """Masses and band masses of the "ok" rows of curve ``k``."""
+    """Masses and band masses of the mass-valid rows of curve ``k``; sets "band_nan" where the band is NaN."""
     p = data.paths
     grey = prof["grey"].astype(float)
     if constant_grey:
@@ -553,14 +575,18 @@ def _fill_masses(k, data: _Curve, prof, air, rho_img, constant_grey) -> None:
     profile_mass = data.c * integral
     by_m = {}
     for row, a in zip(data.rows, data.row_group):
-        if row["status"] != "ok":
+        if row["status"] not in MASS_VALID_STATUSES:
             continue
         m = row["m"]
         if m not in by_m:
             valid = data.valid[:, m - 1] & (data.group >= 0)
             by_m[m] = (valid, _group_median(data.group[valid], profile_mass[valid, m - 1], len(data.arcs)))
         valid, medians = by_m[m]
+        if not np.isfinite(medians[a]):               # not reached by construction (valid profiles)
+            row.update(status="short", clean=False, spacing_px=float("nan"), motif="")
+            continue
         row["mass"] = float(medians[a])
         members = valid & (data.group == a)
         ends = p.start_xy[members] + p.nu[members] * p.t[members, m - 1][:, None]
         row["band_mass"] = band_mass(rho_img, data.inner[a], ends)
+        row["status"] = "ok" if np.isfinite(row["band_mass"]) else "band_nan"

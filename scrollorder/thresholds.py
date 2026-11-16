@@ -68,3 +68,7 @@ FOLD_FRAC = 0.3
 # Statistiques
 N_BOOT = 2000
 CI_LEVEL = 0.95
+
+# Estimateur de l'air : règle de décision préenregistrée (spec, section 13 « Changements », 2026-11-16)
+AIR_BIAS_MEDIAN_MAX = 0.02
+AIR_BIAS_MAX = 0.04

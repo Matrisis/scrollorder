@@ -451,3 +451,43 @@ Citées de mémoire, non relues pour ce document, sauf mention.
 - Solveur de fibres de l'équipe : `vesuvius/docs/wgraph.md` et `wgraph-quickstart.md`, dépôt `villa` (lus le 15 novembre).
 - Anatomie d'un rouleau, raccords et délaminations : `SCROLL_ANATOMY.md`, dépôt `villa` (lu le 15 novembre).
 - Notes préparatoires : `research_notes/Méthodes déroulage/` (quatre rapports d'agents, relevé du Discord, relevé des données).
+
+## 13. Changements
+
+Cette section est le registre des changements et des règles décidées après la rédaction de ce document. Chaque entrée est datée, et son commit précède le tirage des coupes (tâche 12) : on n'écrit jamais ici une règle en ayant déjà regardé une coupe de mesure.
+
+### 2026-11-16 : règle de décision sur l'estimateur du niveau de l'air
+
+Écrite à la demande de Matthieu, après la revue de la tâche 7, avant le tirage des coupes. Aucune coupe de mesure n'a été ouverte à cette date.
+
+**Le problème.** Le plan fixe l'estimateur A du niveau de l'air : pour chaque profil d'un arc propre, le minimum de la moyenne glissante (fenêtre de 4 px), puis le 25e centile par tuile de 2 mm. Un minimum de valeurs bruitées est biaisé vers le bas. L'air estimé est donc trop bas de δ, et la masse de chaque trajet est gonflée de δ × (longueur du trajet). Un trajet de zone propre (vide large, trajet long) est plus gonflé qu'un trajet de zone serrée (vide court, trajet court). Le biais déforme donc justement le rapport que T1 teste. Mesure sur le fantôme synthétique (air vrai 20, feuille 200, σ_ref0 = 720) :
+
+| Bruit | Air estimé | σ_ref0 | Masse serrée / masse propre |
+|---|---|---|---|
+| 4 | 18,6 | + 2,4 % | 0,979 |
+| 8 | 17,2 | + 5,0 % | 0,963 |
+| 16 | 15,3 | + 8,9 % | 0,938 |
+
+Les comptes restent exacts jusqu'à m = 4 dans ces essais, mais la marge fond. La section T1 dit qu'un biais de 10 % sur le poids d'une feuille fait tomber le compte sous 70 %.
+
+**Mesure du biais.** Elle se fait sur les 10 coupes de réglage, jamais sur les 40 de mesure. Sur chaque coupe de réglage, on calcule deux cartes de l'air :
+
+- A, l'estimateur actuel ;
+- B, l'estimateur de remplacement. Pour chaque arc propre, on cherche le vide sur le profil médian de l'arc (médiane, échantillon par échantillon, des profils de l'arc), avec la même fenêtre glissante que A. Le niveau de l'arc est la médiane, sur les profils de l'arc, de la moyenne glissante à cet emplacement fixé. La suite (25e centile par tuile, lissage d'une tuile, interpolation) est identique à A. L'emplacement du vide n'est plus choisi sur le bruit du profil mesuré, ce qui supprime le biais de sélection.
+
+Pour chaque coupe de réglage i :
+
+- δ_i = médiane, sur les tuiles qui contiennent des arcs propres, de (air_B − air_A) ;
+- ε_i = δ_i × (s_propre − t_serré) / σ_ref0, où s_propre est l'espacement médian des arcs propres (en px), t_serré l'espacement médian des arcs m = 1 du décile serré de la coupe (en px), et σ_ref0 est calculé avec A.
+
+ε_i est l'écart relatif de masse que le biais de A crée entre un trajet de zone propre et un trajet serré. Vérification sur le fantôme de bruit 8 : δ = 2,8, s_propre = 12, t_serré = 4, σ_ref0 = 720, donc ε = 3,1 %, cohérent avec le rapport mesuré de 0,963.
+
+**Règle.**
+
+- Si la médiane des 10 ε_i est au plus 0,02 et si leur maximum est au plus 0,04, on garde A pour toute la suite : réglage, mesure, contrôle négatif, niveaux de résolution.
+- Sinon, on adopte B pour toute la suite, sans autre essai. On n'invente pas de troisième méthode. Si les cartes d'air de B sont manifestement fausses sur les figures de contrôle, on s'arrête et on demande à Matthieu.
+- Les deux seuils sont dans `thresholds.py` (`AIR_BIAS_MEDIAN_MAX` = 0,02, `AIR_BIAS_MAX` = 0,04). Justification : la section T1 attend une conservation entre 0,95 et 1,05, et dit qu'un biais de 10 % fait tomber le compte sous 70 %. Un écart de 2 % laisse l'essentiel de la marge à la dispersion des feuilles ; le maximum de 4 % empêche qu'une seule coupe très bruitée passe inaperçue.
+- Le diagnostic s'exécute avant toute mesure, en mode `t1 --tune-only` : il écrit `results/T1/<échantillon>/air_bias.json` (les 10 ε_i, la médiane, le maximum, la décision). Ce fichier est commité avant de lancer la mesure sur les 40 coupes de mesure.
+- Après l'ouverture d'une coupe de mesure, on ne change plus ni ces seuils, ni l'estimateur B, ni cette règle. Tout autre changement s'écrit ici, daté, avant de relancer.
+
+**Où cela s'applique dans le plan.** Tâche 7b (option `air_method`, diagnostic `air_bias`, tests sur le fantôme bruité) et tâche 13 (mode `--tune-only`, décision enregistrée avant la mesure).

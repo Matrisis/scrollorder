@@ -200,3 +200,58 @@ def write_fake_config(tmp, sample: str, n_segments: int) -> Path:
     path = Path(tmp) / f"{sample}.json"
     path.write_text(json.dumps(cfg, indent=2))
     return path
+
+
+# --- a two-level volume ------------------------------------------------------------------------
+
+def _next_level(level0: np.ndarray, pyramid: str) -> np.ndarray:
+    """Level 1 of a volume, with the shape rule of the real server: ceil(shape / 2) on every axis.
+
+    "stride" keeps every second voxel from index 0; "mean" averages each 2x2x2 block over the voxels
+    it really has (an edge block of an odd axis is smaller), rounded for an integer dtype.
+    """
+    if pyramid == "stride":
+        return level0[::2, ::2, ::2]
+    sums, counts = level0.astype(np.float64), np.ones(level0.shape)
+    for axis, n in enumerate(level0.shape):
+        starts = np.arange(0, n, 2)
+        sums = np.add.reduceat(sums, starts, axis=axis)
+        counts = np.add.reduceat(counts, starts, axis=axis)
+    mean = sums / counts
+    if np.issubdtype(level0.dtype, np.integer):
+        mean = np.rint(mean)
+    return mean.astype(level0.dtype)
+
+
+def make_fake_volume(root, data=None, dtype="uint8", pyramid="mean"):
+    """A two-level zarr v2 volume behind a ``FakeBucket``, returned as the ``Volume`` that reads it.
+
+    ``root/bucket`` holds the group ``vol.zarr`` (arrays ``0`` and ``1``, axes z, y, x) and ``root/cache``
+    is the ``Remote`` cache; ``volume.remote.opener`` is the ``FakeBucket``. ``data`` is level 0, cast
+    to ``dtype`` (default: seed-0 random integers in [0, 255) of shape (13, 64, 64)). Level 1 is
+    ``ceil(shape / 2)`` big: block means for ``"mean"``, one voxel out of two for ``"stride"``.
+    """
+    import zarr
+
+    from scrollorder.remote import Remote
+    from scrollorder.volume import Volume
+
+    if pyramid not in ("mean", "stride"):
+        raise ValueError(f"unknown pyramid {pyramid!r}")
+    root = Path(root)
+    if data is None:
+        data = np.random.default_rng(0).integers(0, 255, (13, 64, 64), dtype=np.uint8)
+    level0 = np.asarray(data).astype(dtype)
+    level1 = _next_level(level0, pyramid)
+    group = zarr.create_group(
+        store=str(root / "bucket" / "vol.zarr"), zarr_format=2,
+        attributes={"multiscales": [{
+            "version": "0.4", "name": "vol",
+            "axes": [{"name": a, "type": "space"} for a in "zyx"],
+            "datasets": [{"path": "0"}, {"path": "1"}],
+        }]})
+    for name, values, chunks in (("0", level0, (8, 32, 32)), ("1", level1, (4, 16, 16))):
+        array = group.create_array(name, shape=values.shape, chunks=chunks, dtype=values.dtype, fill_value=0)
+        array[:] = values
+    remote = Remote(base_url="https://h", cache_dir=root / "cache", opener=FakeBucket(root / "bucket"))
+    return Volume(remote=remote, group="vol.zarr", levels={0: "0", 1: "1"}, voxel_mm=0.002399, pyramid=pyramid)

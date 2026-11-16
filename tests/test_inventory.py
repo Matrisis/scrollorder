@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import urllib.error
 import urllib.parse
 
@@ -215,7 +216,7 @@ def test_a_non_finite_fill_value_is_written_as_text_so_that_the_json_stays_valid
     bucket.put("S/volumes/f.zarr/.zattrs", json.dumps({"multiscales": [{"datasets": [{"path": "0"}]}]}).encode())
     _v2_array(bucket, "S/volumes/f.zarr/0", shape=(2, 2), fill_value="NaN", dtype="<f4")
     volume = inventory(_remote(tmp_path, bucket), "S")["volumes"][0]
-    assert volume["levels"][0]["fill_value"] == "nan" and volume["levels"][0]["dtype"] == "float32"
+    assert volume["levels"][0]["fill_value"] == "NaN" and volume["levels"][0]["dtype"] == "float32"
     json.dumps(volume, allow_nan=False)
 
 
@@ -420,7 +421,8 @@ def test_inventory_command_writes_the_json_and_creates_the_folders(tmp_path, mon
     inv = json.loads(out.read_text())
     assert [s["name"] for s in inv["segments"]] == ["s-w000_1", "s-w001_1"]
     assert inv["volumes"][0]["levels"][0]["shape"] == [13, 64, 64]
-    assert str(out) in capsys.readouterr().out
+    printed = capsys.readouterr().out
+    assert str(out) in printed and "entries in error: 0" in printed
 
 
 def test_inventory_command_explains_a_refused_listing(tmp_path, monkeypatch):
@@ -441,3 +443,99 @@ def test_fetch_segments_command_prints_the_local_folders_in_order(tmp_path, monk
     cli.main(["fetch-segments", "--config", str(write_fake_config(tmp_path, "S", 2))])
     lines = capsys.readouterr().out.splitlines()
     assert lines == [str(tmp_path / "c" / "S" / "segments" / f"s-w00{i}_1") for i in range(2)]
+
+
+# --- fix round 1: non-finite numbers, output path checked first, entries in error shown ------------
+
+def _no_json_constant(name):
+    raise AssertionError(f"the file holds the JSON-invalid constant {name}")
+
+
+def test_inventory_command_turns_non_finite_numbers_of_zarr_metadata_into_text(tmp_path, monkeypatch):
+    bucket = FakeBucket(tmp_path / "b")
+    # what real writers (numpy, python) emit: bare NaN / Infinity / -Infinity, also nested in lists
+    bucket.put("S/volumes/n.zarr/.zattrs", (
+        '{"multiscales": [{"datasets": [{"path": "0"}]}], '
+        '"stats": {"min": NaN, "max": Infinity, "range": [-Infinity, 1.5], "big": 1e999}}').encode())
+    _v2_array(bucket, "S/volumes/n.zarr/0", attrs=None)
+    bucket.put("S/volumes/n.zarr/0/.zattrs", b'{"window": [NaN, {"hi": Infinity}]}')
+    bucket.put("S/representations/predictions/p/a.zarr/zarr.json", json.dumps({
+        "zarr_format": 3, "node_type": "array", "shape": [3, 5], "data_type": "float32",
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [3, 5]}},
+        "chunk_key_encoding": {"name": "default", "configuration": {"separator": "/"}},
+        "fill_value": float("nan"), "codecs": [{"name": "bytes"}],
+        "attributes": {"stat": float("-inf"), "per_channel": [[float("nan")], [1.0]]}}).encode())
+    monkeypatch.setattr(cli, "make_remote", lambda: _remote(tmp_path, bucket))
+    out = tmp_path / "inv.json"
+    cli.main(["inventory", "--sample", "S", "--out", str(out)])
+    inv = json.loads(out.read_text(), parse_constant=_no_json_constant)           # strict JSON
+    volume = inv["volumes"][0]
+    assert volume["attributes"]["stats"] == {"min": "NaN", "max": "Infinity", "range": ["-Infinity", 1.5],
+                                             "big": "Infinity"}
+    assert volume["levels"][0]["attributes"] == {"window": ["NaN", {"hi": "Infinity"}]}
+    prediction = inv["predictions"][0]
+    assert prediction["attributes"] == {"stat": "-Infinity", "per_channel": [["NaN"], [1.0]]}
+    assert prediction["levels"][0]["fill_value"] == "NaN"
+
+
+@pytest.mark.parametrize("case", ["parent_under_a_file", "output_is_a_folder"])
+def test_inventory_command_fails_before_any_request_when_the_output_cannot_be_written(tmp_path, monkeypatch, case):
+    bucket = FakeBucket(tmp_path / "b"); bucket.put("S/x.json", b"{}")
+    requests = []
+
+    def opener(url):
+        requests.append(url)
+        return bucket(url)
+
+    monkeypatch.setattr(cli, "make_remote", lambda: _remote(tmp_path, opener))
+    if case == "parent_under_a_file":
+        (tmp_path / "file").write_text("x")
+        out = tmp_path / "file" / "sub" / "inv.json"
+    else:
+        out = tmp_path / "a_folder"
+        out.mkdir()
+    with pytest.raises(SystemExit) as err:
+        cli.main(["inventory", "--sample", "S", "--out", str(out)])
+    assert str(out) in str(err.value)
+    assert requests == []                                   # the ~800 uncached requests were not started
+
+
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0, reason="permissions do not stop root")
+def test_inventory_command_fails_before_any_request_when_the_output_folder_is_read_only(tmp_path, monkeypatch):
+    bucket = FakeBucket(tmp_path / "b"); bucket.put("S/x.json", b"{}")
+    requests = []
+    monkeypatch.setattr(cli, "make_remote", lambda: _remote(tmp_path, lambda url: requests.append(url) or bucket(url)))
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o500)
+    try:
+        with pytest.raises(SystemExit) as err:
+            cli.main(["inventory", "--sample", "S", "--out", str(locked / "inv.json")])
+    finally:
+        locked.chmod(0o700)
+    assert "locked" in str(err.value) and requests == []
+
+
+@needs_zarr
+def test_inventory_command_checks_the_output_folder_is_writable_then_leaves_no_probe_behind(tmp_path, monkeypatch):
+    bucket = make_fake_sample(tmp_path / "b", sample="S", n_segments=1)
+    monkeypatch.setattr(cli, "make_remote", lambda: _remote(tmp_path, bucket))
+    out = tmp_path / "new" / "deeper" / "inv.json"
+    cli.main(["inventory", "--sample", "S", "--out", str(out)])
+    assert [p.name for p in out.parent.iterdir()] == ["inv.json"]
+
+
+def test_inventory_command_prints_the_entries_in_error_and_still_succeeds(tmp_path, monkeypatch, capsys):
+    bucket = FakeBucket(tmp_path / "b")
+    bucket.put("S/volumes/empty.zarr/chunk", b"1")                          # no metadata at all: the whole volume
+    bucket.put("S/volumes/g.zarr/.zattrs", json.dumps(
+        {"multiscales": [{"datasets": [{"path": "0"}, {"path": "1"}]}]}).encode())
+    _v2_array(bucket, "S/volumes/g.zarr/0", shape=(8, 8))                    # level 1 is missing: one level
+    monkeypatch.setattr(cli, "make_remote", lambda: _remote(tmp_path, bucket))
+    out = tmp_path / "inv.json"
+    cli.main(["inventory", "--sample", "S", "--out", str(out)])               # no SystemExit: the exit code stays 0
+    printed = capsys.readouterr().out
+    assert "entries in error: 2" in printed
+    assert "S/volumes/empty.zarr" in printed and "S/volumes/g.zarr/1" in printed
+    assert "S/volumes/g.zarr/0" not in printed
+    assert out.is_file()

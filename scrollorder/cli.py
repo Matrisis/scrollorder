@@ -4,13 +4,14 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import tempfile
 from pathlib import Path
 
 import numpy as np
 
 from .dataconf import load_config
 from .experiments import evaluate_barcode, evaluate_ordered_cut
-from .inventory import fetch_segments, inventory
+from .inventory import entries_in_error, fetch_segments, inventory
 from .io_real import build_stack, umbilicus_center
 from .polar import polar_resample
 from .remote import Remote
@@ -77,6 +78,20 @@ def _overlay(image, stack, center, path) -> None:
     ax.set_title("verified windings over the probability slice: they must sit on the ridges")
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
+
+
+def _prepare_output(path) -> Path:
+    """Create the folder of ``path`` and check that it can be written, before a long run starts."""
+    out = Path(path)
+    try:
+        if out.is_dir():
+            raise IsADirectoryError(f"{out} is a folder")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryFile(dir=out.parent):          # anonymous file: nothing is left behind
+            pass
+    except OSError as exc:
+        raise SystemExit(f"cannot write {out}: {exc}")
+    return out
 
 
 def make_remote() -> Remote:
@@ -169,15 +184,18 @@ def main(argv=None) -> None:
         _write_csv(evaluate_barcode(stack, bands, n_trials=args.trials, max_drop=args.max_drop, seed=args.seed), args.out)
 
     elif args.command == "inventory":
+        out = _prepare_output(args.out)              # the walk is long and not cached: fail on the output first
         try:
             inv = inventory(make_remote(), args.sample)
         except OSError as exc:                       # refused or unreachable server, unknown sample
             raise SystemExit(f"inventory of {args.sample!r} failed: {exc}")
-        out = Path(args.out)
-        out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(inv, indent=2, allow_nan=False) + "\n", encoding="utf-8")
         print(f"{len(inv['volumes'])} volumes, {len(inv['segments'])} segments, {len(inv['predictions'])} predictions, "
               f"{len(inv['kollesis_keys'])} kollesis keys -> {out}")
+        errors = entries_in_error(inv)               # not fatal: the JSON holds them, the console must not hide them
+        print(f"entries in error: {len(errors)}")
+        for key, message in errors:
+            print(f"  {key}: {message if len(message) <= 100 else message[:97] + '...'}")
 
     elif args.command == "fetch-segments":
         try:

@@ -74,9 +74,29 @@ def _walk(remote: Remote, root: str, *, max_depth: int | None = None, skip: froz
 
 # --- zarr descriptions -----------------------------------------------------------------------
 
+def _non_finite_text(value: float) -> str:
+    """The JSON constant that names ``value`` (``NaN``, ``Infinity``, ``-Infinity``), which is not a valid JSON number."""
+    return "NaN" if math.isnan(value) else "Infinity" if value > 0 else "-Infinity"
+
+
 def _json_number(value: float):
-    """``value`` as a JSON number; ``"nan"``, ``"inf"`` and ``"-inf"`` (not valid JSON numbers) as text."""
-    return float(value) if math.isfinite(value) else str(float(value))
+    """``value`` as a JSON number, or as text when it is not finite."""
+    return float(value) if math.isfinite(value) else _non_finite_text(value)
+
+
+def _parse_float(text: str):
+    value = float(text)                                       # 1e999 reads as infinity
+    return value if math.isfinite(value) else _non_finite_text(value)
+
+
+def _load_metadata(data: bytes):
+    """``json.loads`` for zarr metadata that will be copied into the inventory.
+
+    Writers such as numpy or python emit bare ``NaN`` / ``Infinity`` / ``-Infinity`` (invalid JSON
+    that ``json.loads`` accepts as floats). Anywhere in the document, nested or in a list, they
+    (and numbers too big for a float) become the text of that constant, so the inventory is strict JSON.
+    """
+    return json.loads(data, parse_constant=str, parse_float=_parse_float)
 
 
 def _node_metadata(remote: Remote, key: str) -> tuple[dict, list | None]:
@@ -87,10 +107,10 @@ def _node_metadata(remote: Remote, key: str) -> tuple[dict, list | None]:
     """
     v3 = remote.local_path(f"{key}/zarr.json")
     if v3.is_file():
-        doc = json.loads(v3.read_bytes())
+        doc = _load_metadata(v3.read_bytes())
         return doc.get("attributes") or {}, doc.get("dimension_names")
     v2 = remote.fetch(f"{key}/.zattrs")
-    return (json.loads(v2.read_bytes()) if v2 is not None else {}), None
+    return (_load_metadata(v2.read_bytes()) if v2 is not None else {}), None
 
 
 def _describe_array(remote: Remote, key: str, path: str, *, with_attributes: bool) -> dict:
@@ -188,6 +208,16 @@ def inventory(remote: Remote, sample: str) -> dict:
         "predictions": [_describe_zarr(remote, key) for key in sorted(predictions.zarrs)],
         "kollesis_keys": sorted({n for n in names if "kolles" in n[len(root):].lower()}),
     }
+
+
+def entries_in_error(inv: dict) -> list[tuple[str, str]]:
+    """(key, message) of every volume, prediction or level of ``inv`` whose metadata could not be read."""
+    found = []
+    for entry in inv["volumes"] + inv["predictions"]:
+        if "error" in entry:
+            found.append((entry["group"], entry["error"]))
+        found += [(level["key"], level["error"]) for level in entry["levels"] if "error" in level]
+    return found
 
 
 # --- surfaces --------------------------------------------------------------------------------

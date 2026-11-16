@@ -14,6 +14,7 @@ import itertools
 import json
 import operator
 import os
+import secrets
 import threading
 import time
 import urllib.error
@@ -121,7 +122,8 @@ class Remote:
                     f"fetching {key!r} ({len(data)} bytes) would take the cache from {total} bytes "
                     f"over its budget of {self.budget_bytes} bytes ({self.cache_dir})")
             target.parent.mkdir(parents=True, exist_ok=True)
-            part = target.with_name(target.name + ".part")
+            # unique per writer (process and call): two processes filling one key never share a partial file
+            part = target.with_name(f"{target.name}.{os.getpid()}.{secrets.token_hex(4)}.part")
             try:
                 part.write_bytes(data)
                 os.replace(part, target)
@@ -183,10 +185,14 @@ def _local_name(tag: str) -> str:
 
 def _parse_listing(body: bytes, prefixes: list[str], keys: list[tuple[str, int]]) -> tuple[bool, str | None]:
     """Add one page to ``prefixes`` and ``keys``; return (IsTruncated, NextContinuationToken)."""
-    if b"<!DOCTYPE" in body or b"<!ENTITY" in body:    # S3 never sends a DTD: refuse entity tricks
+    try:
+        text = body.decode("utf-8-sig")                # strict: other encodings could hide a DTD from the check
+    except UnicodeDecodeError as exc:
+        raise OSError("listing answer is not UTF-8") from exc
+    if "<!DOCTYPE" in text or "<!ENTITY" in text:      # S3 never sends a DTD: refuse entity tricks
         raise OSError("unexpected DTD in a listing answer")
     try:
-        root = ET.fromstring(body)
+        root = ET.fromstring(text)                     # the text that was checked is the text that is parsed
     except ET.ParseError as exc:
         raise OSError(f"unreadable listing: {exc}") from exc
     if _local_name(root.tag) != "ListBucketResult":
@@ -198,7 +204,13 @@ def _parse_listing(body: bytes, prefixes: list[str], keys: list[tuple[str, int]]
             prefixes.extend(p.text or "" for p in child if _local_name(p.tag) == "Prefix")
         elif name == "Contents":
             fields = {_local_name(e.tag): (e.text or "") for e in child}
-            keys.append((fields["Key"], int(fields.get("Size") or 0)))
+            if "Key" not in fields:
+                raise OSError("malformed listing: <Contents> without <Key>")
+            try:
+                size = int(fields.get("Size") or 0)
+            except ValueError as exc:
+                raise OSError(f"malformed listing: size {fields['Size']!r} of {fields['Key']!r}") from exc
+            keys.append((fields["Key"], size))
         elif name == "IsTruncated":
             truncated = (child.text or "").strip().lower() == "true"
         elif name == "NextContinuationToken":

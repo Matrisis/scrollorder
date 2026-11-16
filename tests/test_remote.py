@@ -1,5 +1,6 @@
 import http.client
 import json
+import os
 import threading
 import urllib.error
 import urllib.request
@@ -405,3 +406,65 @@ def test_fake_bucket_serves_counts_and_deletes(tmp_path):
     assert info.value.code == 404 and bucket.calls == 1
     with pytest.raises(FileNotFoundError):
         bucket.delete_chunk("A", (0, 0))                # nothing left to delete: a wrong key fails loudly
+
+
+# --- hardening (fix round 1) -----------------------------------------------------------------
+
+def test_a_failed_write_leaves_no_partial_file_and_the_next_fetch_starts_over(tmp_path, monkeypatch):
+    bucket = FakeBucket(tmp_path / "b"); bucket.put("A/x.bin", b"abc"); bucket.put("B", b"12345")
+    cache = tmp_path / "c"
+    r = Remote(base_url="https://h", cache_dir=cache, opener=bucket)
+    r.fetch("B")
+    assert r.cache_bytes() == 5
+    def disk_full(src, dst): raise OSError("disk full")
+    with monkeypatch.context() as patch:
+        patch.setattr("scrollorder.remote.os.replace", disk_full)
+        with pytest.raises(OSError, match="disk full"):
+            r.fetch("A/x.bin")
+    assert [p for p in cache.rglob("*") if p.is_file()] == [cache / "B"]    # no .part, no target
+    assert r.cache_bytes() == 5
+    assert r.fetch("A/x.bin").read_bytes() == b"abc"                        # a new attempt starts from zero
+    assert r.cache_bytes() == 8 and bucket.calls == 3
+
+def test_each_writer_uses_its_own_partial_file_name(tmp_path, monkeypatch):
+    bucket = FakeBucket(tmp_path / "b"); bucket.put("A/x.bin", b"abc")
+    cache = tmp_path / "c"
+    sources, real_replace = [], os.replace
+    def spy(src, dst):
+        sources.append(Path(src))
+        real_replace(src, dst)
+    monkeypatch.setattr("scrollorder.remote.os.replace", spy)
+    Remote(base_url="https://h", cache_dir=cache, opener=bucket).fetch("A/x.bin")
+    (cache / "A" / "x.bin").unlink()
+    Remote(base_url="https://h", cache_dir=cache, opener=bucket).fetch("A/x.bin")   # a second writer
+    first, second = sources
+    assert first != second
+    for src in sources:
+        assert src.parent == cache / "A" and src.name.startswith("x.bin.") and src.name.endswith(".part")
+    assert [p.name for p in (cache / "A").iterdir()] == ["x.bin"]
+
+def _answer(body):
+    return Remote(base_url="https://h", cache_dir=Path("unused"), opener=lambda url: body)
+
+def test_list_refuses_a_non_utf8_answer_carrying_a_dtd():
+    xml = ('<?xml version="1.0" encoding="UTF-16"?>'
+           '<!DOCTYPE ListBucketResult [<!ENTITY e "boom">]>'
+           '<ListBucketResult><Name>&e;</Name><IsTruncated>false</IsTruncated></ListBucketResult>')
+    with pytest.raises(OSError):
+        _answer(xml.encode("utf-16")).list("P/")
+
+def test_list_refuses_a_utf8_answer_carrying_a_dtd():
+    xml = ('<?xml version="1.0" encoding="UTF-8"?>'
+           '<!DOCTYPE ListBucketResult [<!ENTITY e "boom">]>'
+           '<ListBucketResult><Name>&e;</Name><IsTruncated>false</IsTruncated></ListBucketResult>')
+    with pytest.raises(OSError):
+        _answer(xml.encode("utf-8")).list("P/")
+
+@pytest.mark.parametrize("contents", [
+    "<Contents><Size>3</Size></Contents>",                         # no Key
+    "<Contents><Key>k</Key><Size>three</Size></Contents>",         # Size is not a number
+])
+def test_list_raises_oserror_on_a_malformed_contents_entry(contents):
+    xml = f"<ListBucketResult><IsTruncated>false</IsTruncated>{contents}</ListBucketResult>"
+    with pytest.raises(OSError):
+        _answer(xml.encode("utf-8")).list("P/")

@@ -50,15 +50,13 @@ class FakeBucket:
     """Serves the files under ``root`` like the public bucket; call it with a URL, get bytes.
 
     ``calls`` counts the files actually served (a 404 is not a file read, a listing is not
-    either: see ``list_calls``). ``delete_chunk`` reads the metadata straight from ``root`` and
-    never touches the counters.
+    either). ``delete_chunk`` reads the metadata straight from ``root`` and never touches it.
     """
 
     def __init__(self, root, page_size: int = 1000):
         self.root = Path(root)
         self.page_size = page_size
         self.calls = 0
-        self.list_calls = 0
         self._lock = threading.Lock()
 
     # -- serving ---------------------------------------------------------------------------
@@ -84,8 +82,6 @@ class FakeBucket:
         return self.root.joinpath(*names)
 
     def _list(self, url: str, query) -> bytes:
-        with self._lock:
-            self.list_calls += 1
         prefix = query.get("prefix", [""])[0]
         delimiter = query.get("delimiter", [""])[0]
         token = query.get("continuation-token", [None])[0]

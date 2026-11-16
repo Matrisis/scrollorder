@@ -5,11 +5,14 @@ No test may touch the network: everything that reads the server goes through
 """
 from __future__ import annotations
 
+import json
 import threading
 import urllib.error
 import urllib.parse
 from pathlib import Path
 from xml.sax.saxutils import escape
+
+import numpy as np
 
 S3_NAMESPACE = "http://s3.amazonaws.com/doc/2006-03-01/"
 # Real S3 tokens are opaque and contain characters that must be percent-encoded.
@@ -136,3 +139,64 @@ class FakeBucket:
             zarr_json=zarr_json.read_bytes() if zarr_json.is_file() else None,
         )
         (base / meta.chunk_key(tuple(idx))).unlink()
+
+
+# --- a small sample laid out like the real server ----------------------------------------------
+
+def make_fake_sample(root, sample: str, n_segments: int, with_surface_volume: bool = False) -> FakeBucket:
+    """A bucket holding one tiny sample, laid out like the real ``<sample>/...`` tree.
+
+    - ``{sample}/volumes/v.zarr``: OME-Zarr (format 3), one level ``0``, shape (13, 64, 64), uint8;
+    - ``{sample}/segments/s-w00{i}_1/``: ``x.tif y.tif z.tif meta.json`` straight in the folder (the real
+      server nests them in ``mesh/<id>.tifxyz/``; tests add that layout with ``bucket.put``), and
+      ``surface-volumes/sv.zarr/zarr.json`` when ``with_surface_volume``;
+    - ``{sample}/representations/predictions/lasagna/l.zarr``: a format 3 array (2 channels), metadata only.
+    """
+    import zarr
+
+    from tests.helpers import cylinder_grid, write_tifxyz
+
+    root = Path(root)
+    volume = zarr.create_group(
+        store=str(root / sample / "volumes" / "v.zarr"), zarr_format=3,
+        attributes={"ome": {"version": "0.5", "multiscales": [{
+            "name": "v",
+            "axes": [{"name": a, "type": "space"} for a in "zyx"],
+            "datasets": [{"path": "0", "coordinateTransformations": [{"type": "scale", "scale": [1.0, 1.0, 1.0]}]}],
+        }]}})
+    level0 = volume.create_array("0", shape=(13, 64, 64), chunks=(8, 32, 32), dtype="uint8", fill_value=0)
+    level0[:] = np.random.default_rng(0).integers(0, 255, (13, 64, 64), dtype=np.uint8)
+    zarr.create_array(
+        store=str(root / sample / "representations" / "predictions" / "lasagna" / "l.zarr"),
+        shape=(2, 13, 16, 16), chunks=(1, 13, 16, 16), dtype="uint8", fill_value=0, zarr_format=3,
+        attributes={"channels": ["grad_mag", "cos"]})
+    x, y, z = cylinder_grid(n_rows=4, n_cols=8)
+    for i in range(n_segments):
+        folder = root / sample / "segments" / f"s-w{i:03d}_1"
+        write_tifxyz(folder, x, y, z)
+        if with_surface_volume:
+            (folder / "surface-volumes" / "sv.zarr").mkdir(parents=True)
+            (folder / "surface-volumes" / "sv.zarr" / "zarr.json").write_text(json.dumps(
+                {"zarr_format": 3, "node_type": "group", "attributes": {}}))
+    return FakeBucket(root)
+
+
+def write_fake_config(tmp, sample: str, n_segments: int) -> Path:
+    """The ``config/<sample>.json`` that goes with ``make_fake_sample``; returns its path."""
+    cfg = {
+        "sample": sample,
+        "voxel_mm": 0.002399,
+        "volume": {"group": f"{sample}/volumes/v.zarr", "levels": {"0": "0"}, "axes": "zyx"},
+        "pyramid": "mean",
+        "segments": [{"name": f"w{i:03d}", "prefix": f"{sample}/segments/s-w{i:03d}_1/"} for i in range(n_segments)],
+        "tifxyz_to_l0": 1.0,
+        "lasagna": {"level": 0, "grad_scale": 1000.0, "channels": {
+            "grad_mag": {"key": f"{sample}/representations/predictions/lasagna/l.zarr", "index": 0},
+            "cos": {"key": f"{sample}/representations/predictions/lasagna/l.zarr", "index": 1}}},
+        "recto_offset_px": 0.0,
+        "mass_from_l0": False,
+        "overlay_ok": None,
+    }
+    path = Path(tmp) / f"{sample}.json"
+    path.write_text(json.dumps(cfg, indent=2))
+    return path

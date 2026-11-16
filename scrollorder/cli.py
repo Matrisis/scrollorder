@@ -1,15 +1,19 @@
-"""Command line: python -m scrollorder {stack,cut,barcode} ...  (see README)."""
+"""Command line: python -m scrollorder {stack,cut,barcode,inventory,fetch-segments} ...  (see README)."""
 from __future__ import annotations
 
 import argparse
 import csv
+import json
 from pathlib import Path
 
 import numpy as np
 
+from .dataconf import load_config
 from .experiments import evaluate_barcode, evaluate_ordered_cut
+from .inventory import fetch_segments, inventory
 from .io_real import build_stack, umbilicus_center
 from .polar import polar_resample
+from .remote import Remote
 
 
 def _load_image(path) -> np.ndarray:
@@ -75,6 +79,11 @@ def _overlay(image, stack, center, path) -> None:
     plt.close(fig)
 
 
+def make_remote() -> Remote:
+    """The anonymous connection to the public data server, with the default cache (tests replace this)."""
+    return Remote()
+
+
 def _add_center_args(p) -> None:
     p.add_argument("--center", help="scroll axis in the slice, as x,y (pixels of the slice)")
     p.add_argument("--umbilicus", help="umbilicus JSON (control_points); needs --z")
@@ -118,6 +127,13 @@ def main(argv=None) -> None:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", required=True)
 
+    p = sub.add_parser("inventory", help="list what a sample holds on the public server, into a JSON file")
+    p.add_argument("--sample", required=True, help="sample folder on the server, e.g. PHerc0139")
+    p.add_argument("--out", required=True, help="JSON file to write (parent folders are created)")
+
+    p = sub.add_parser("fetch-segments", help="download the tifxyz surfaces named in a sample configuration")
+    p.add_argument("--config", required=True, help="config/<sample>.json")
+
     args = parser.parse_args(argv)
 
     if args.command == "stack":
@@ -151,6 +167,29 @@ def main(argv=None) -> None:
         stack = np.load(args.stack)
         bands = [max(1, round(float(d) / 360 * stack.shape[1])) for d in args.bands_deg.split(",")]
         _write_csv(evaluate_barcode(stack, bands, n_trials=args.trials, max_drop=args.max_drop, seed=args.seed), args.out)
+
+    elif args.command == "inventory":
+        try:
+            inv = inventory(make_remote(), args.sample)
+        except OSError as exc:                       # refused or unreachable server, unknown sample
+            raise SystemExit(f"inventory of {args.sample!r} failed: {exc}")
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(inv, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+        print(f"{len(inv['volumes'])} volumes, {len(inv['segments'])} segments, {len(inv['predictions'])} predictions, "
+              f"{len(inv['kollesis_keys'])} kollesis keys -> {out}")
+
+    elif args.command == "fetch-segments":
+        try:
+            cfg = load_config(args.config)
+        except ValueError as exc:
+            raise SystemExit(f"{args.config}: {exc}")
+        try:
+            folders = fetch_segments(make_remote(), cfg)
+        except OSError as exc:                       # includes a mandatory file missing on the server
+            raise SystemExit(f"fetch-segments failed: {exc}")
+        for folder in folders:
+            print(folder)
 
 
 if __name__ == "__main__":

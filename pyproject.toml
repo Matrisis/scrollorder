@@ -7,6 +7,7 @@ dependencies = ["numpy", "scipy>=1.8", "tifffile", "matplotlib"]
 
 [project.optional-dependencies]
 test = ["pytest"]
+real = ["zarr>=3"]
 
 [tool.setuptools]
 packages = ["scrollorder"]

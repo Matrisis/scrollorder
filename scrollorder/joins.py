@@ -13,9 +13,14 @@ Only the mass of the rows is used: a row takes part if its status is in ``MASS_V
 
 ``u`` is the position along the grid of the curve (``Curve.u_mm``), taken at the middle of each arc; each
 arc stands for ``arc_mm`` of ``u`` around it, so a run goes from half an arc before its first arc to half an
-arc after its last.  ``theta`` goes from the first to the last arc of the run with increasing angle, and
-may pass through ``2 * pi``; the angular test is made modulo ``2 * pi`` (an interval of ``2 * pi`` or more
-is not represented).
+arc after its last.
+
+The angles of a run do not depend on the direction of the grid: nothing says that ``theta`` grows with ``u``
+(a grid whose columns run clockwise has it fall).  The ``theta`` of the arcs of a run, taken in ``u`` order,
+are unwrapped (``np.unwrap``: two successive arcs never differ by more than pi), and the run covers
+``[theta_lo, theta_hi]``, the least and the greatest of them, so ``theta_lo <= theta_hi`` always; the bounds may be
+negative or exceed ``2 * pi``.  A neighbouring arc is inside if ``(theta - theta_lo) mod (2 * pi)`` is at most
+``theta_hi - theta_lo`` (ends included, up to ``ANGLE_TOL``); an interval of ``2 * pi`` or more takes every angle.
 """
 from __future__ import annotations
 
@@ -27,13 +32,15 @@ from scrollorder.mass import MASS_VALID_STATUSES
 from scrollorder.thresholds import ARC_MM, JOIN_MASS, JOIN_MATCH_MM, JOIN_MIN_MM, JOIN_NEIGHBOUR_NORMAL
 
 MAX_ARC_STEP = 2                # two successive arcs of a run differ by at most 2: at most one arc is missing
+ANGLE_TOL = 1e-9                # rad: the ends of an angular interval are included to within the rounding of unwrap
 _TWO_PI = 2 * np.pi
 
 
 @dataclass(frozen=True)
 class JoinRun:
     """A run of heavy arcs on winding ``k``: ``u_lo``, ``u_hi`` (mm along the grid, half an arc beyond the
-    first and last arc) and ``theta_lo``, ``theta_hi`` (rad, the angles of the first and last arc)."""
+    first and last arc) and ``theta_lo <= theta_hi`` (rad), the least and the greatest angle of its arcs once
+    unwrapped along ``u`` (they may be negative or exceed ``2 * pi``)."""
 
     k: int
     u_lo: float
@@ -98,15 +105,21 @@ def _consecutive_pieces(selected: np.ndarray, arc: np.ndarray) -> list[np.ndarra
     return np.split(selected, cuts)
 
 
+def _inside_angles(theta: np.ndarray, theta_lo: float, theta_hi: float) -> np.ndarray:
+    """Which of the angles ``theta`` (rad, any turn) are in ``[theta_lo, theta_hi]`` modulo ``2 * pi``, ends included
+    (to within ``ANGLE_TOL``, whichever side of the turn the rounding falls); every angle if the interval is a turn."""
+    offset = (theta - theta_lo) % _TWO_PI                   # in [0, 2 pi): a span of a turn or more takes every angle
+    return (offset <= theta_hi - theta_lo + ANGLE_TOL) | (offset >= _TWO_PI - ANGLE_TOL)
+
+
 def _neighbours_confirm(by_k: dict[int, _Arcs], k: int, theta_lo: float, theta_hi: float, normal) -> bool:
     """No neighbour winding that has arcs over the angles of the run is abnormal, and one at least is normal."""
-    span = (theta_hi - theta_lo) % _TWO_PI
     one_is_normal = False
     for neighbour in (k - 1, k + 1):
         arcs = by_k.get(neighbour)                          # a winding that does not exist has no arcs
         if arcs is None:
             continue
-        inside = arcs.ratio[((arcs.theta - theta_lo) % _TWO_PI) <= span]
+        inside = arcs.ratio[_inside_angles(arcs.theta, theta_lo, theta_hi)]
         if inside.size == 0:
             continue                                        # no data: it cannot veto, nor validate
         if not normal[0] <= float(np.median(inside)) <= normal[1]:
@@ -125,10 +138,16 @@ def find_join_runs(rows_m1: list[dict], sigma_ref: float, arc_mm: float = ARC_MM
     A run goes from ``u_mm`` of its first arc minus ``arc_mm / 2`` to ``u_mm`` of its last arc plus
     ``arc_mm / 2``, and is kept if that is at least ``min_mm`` long.  It also needs its neighbours: for each of
     the windings ``k - 1`` and ``k + 1`` that has arcs whose ``theta`` is inside ``[theta_lo, theta_hi]``
-    (modulo ``2 * pi``), the median of ``mass / sigma_ref`` of these arcs must be in ``neighbour_range`` (bounds
-    included); a winding with no such arc (or that does not exist) neither vetoes nor validates, but at least one
-    of the two must have arcs and be normal.  ``ValueError`` for a ``sigma_ref`` that is not a positive number
-    or a range or length that makes no sense.
+    (modulo ``2 * pi``; ``theta_lo`` and ``theta_hi`` are the least and greatest angle of the arcs of the run
+    unwrapped along ``u``, so the interval is the same whichever way the grid runs), the median of
+    ``mass / sigma_ref`` of these arcs must be in ``neighbour_range`` (bounds included); a winding with no such arc
+    (or that does not exist) neither vetoes nor validates, but at least one of the two must have arcs and be normal.
+    ``ValueError`` for a ``sigma_ref`` that is not a positive number or a range or length that makes no sense.
+
+    Limit: the arcs of a winding are numbered along its grid, which does not wrap.  On a closed ring (the phantom)
+    a join that straddles the seam of the grid, the end of arc ``n - 1`` and the start of arc ``0``, is cut in two
+    runs, each of which may be shorter than ``min_mm``: it is then missed.  This is the conservative side (a join
+    excuses counting errors, a missed one excuses none).
     """
     sigma_ref = float(sigma_ref)
     if not (np.isfinite(sigma_ref) and sigma_ref > 0):
@@ -148,7 +167,8 @@ def find_join_runs(rows_m1: list[dict], sigma_ref: float, arc_mm: float = ARC_MM
             u_lo, u_hi = float(arcs.u[first]) - arc_mm / 2.0, float(arcs.u[last]) + arc_mm / 2.0
             if not u_hi - u_lo >= min_mm:
                 continue
-            theta_lo, theta_hi = float(arcs.theta[first]), float(arcs.theta[last])
+            turned = np.unwrap(arcs.theta[piece])               # the angles along u, whichever way the grid runs
+            theta_lo, theta_hi = float(turned.min()), float(turned.max())
             if _neighbours_confirm(by_k, k, theta_lo, theta_hi, normal):
                 runs.append(JoinRun(k, u_lo, u_hi, theta_lo, theta_hi))
     return runs

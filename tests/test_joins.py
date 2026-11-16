@@ -84,6 +84,96 @@ def test_the_final_reference_leaves_the_join_out(joined):
     assert sref == pytest.approx(meas.sigma_ref0, rel=0.02)
 
 
+# --- the phantom on a grid that runs the other way ----------------------------------------------
+# Nothing says that theta grows with u on a real tifxyz grid.  The columns of every grid of the phantom are reversed
+# (`a[:, ::-1]`, then `curve_at_z` as usual): the same curves, the same image, but u = column * 0.05 mm now grows
+# clockwise, so theta falls along u.
+
+@pytest.fixture(scope="module")
+def joined_clockwise():
+    ph = make_volume_phantom()
+    img = SliceImage(ph["volume"][6].astype(np.float32), (0, 0), 0, 6, 6.0, ph["px_mm"])
+    grids = [tuple(a[:, ::-1] for a in s) for s in ph["surfaces"]]
+    curves = [Curve(f"w{k}", *curve_at_z(*g, 6.0, 0.05)) for k, g in enumerate(grids)]
+    meas = measure_slice(img, curves, center_from_curves(curves), m_max=4)
+    m1 = [r for r in meas.rows if r["m"] == 1]
+    return ph, meas, find_join_runs(m1, meas.sigma_ref0)
+
+def angle_gap(a, b):
+    return abs(((a - b + np.pi) % (2 * np.pi)) - np.pi)
+
+def neighbour_medians(meas, run):
+    """(count, median of mass / sigma_ref0) of the arcs of the windings k - 1 and k + 1 over the angles of the run,
+    selected by the distance to the middle of the run (not by the modulo test of joins.py)."""
+    assert run.theta_lo <= run.theta_hi
+    mid, half = (run.theta_lo + run.theta_hi) / 2, (run.theta_hi - run.theta_lo) / 2
+    out = {}
+    for k in (run.k - 1, run.k + 1):
+        v = [r["mass"] / meas.sigma_ref0 for r in meas.rows if r["m"] == 1 and r["k"] == k
+             and r["status"] in ("ok", "band_nan") and angle_gap(r["theta"], mid) <= half]
+        out[k] = (len(v), float(np.median(v)))
+    return out
+
+def test_the_columns_of_the_reversed_phantom_run_clockwise(joined, joined_clockwise):
+    for (_, meas, _), sign in ((joined, 1), (joined_clockwise, -1)):
+        arcs = sorted((r for r in meas.rows if r["m"] == 1 and r["k"] == 3 and r["status"] == "ok"),
+                      key=lambda r: r["arc"])
+        steps = np.diff(np.unwrap([r["theta"] for r in arcs]))
+        assert np.all(sign * steps > 0)
+        assert np.all(np.diff([r["u_mm"] for r in arcs]) > 0)       # u always grows with the arc
+
+def test_a_join_on_a_grid_that_runs_clockwise_is_the_same_join(joined, joined_clockwise):
+    ph, meas, (fwd,) = joined[0], joined[1], joined[2]
+    ph_c, meas_c, runs_c = joined_clockwise
+    assert [r.k for r in runs_c] == [3]
+    run = runs_c[0]
+    assert run.theta_lo <= run.theta_hi
+    mid, mid_fwd = (run.theta_lo + run.theta_hi) / 2, (fwd.theta_lo + fwd.theta_hi) / 2
+    arc_rad = 0.5 / (0.05 * 66)                                      # an arc is about 0.15 rad on winding 3
+    assert angle_gap(mid, mid_fwd) < arc_rad
+    assert angle_gap(mid, ph_c["join_theta"]) < 0.2
+    assert (run.theta_hi - run.theta_lo) == pytest.approx(fwd.theta_hi - fwd.theta_lo, abs=2 * arc_rad)
+    k3 = sorted(r["u_mm"] for r in meas.rows if r["m"] == 1 and r["k"] == 3)
+    one_arc = float(np.median(np.diff(k3)))                          # an arc, in mm of u
+    assert (run.u_hi - run.u_lo) == pytest.approx(fwd.u_hi - fwd.u_lo, abs=one_arc)
+    assert run.u_hi - run.u_lo >= JOIN_MIN_MM
+
+def test_the_neighbours_of_a_clockwise_run_are_the_ones_over_its_angles(joined, joined_clockwise):
+    (_, meas, (fwd,)), (_, meas_c, (run,)) = joined, joined_clockwise
+    expected, found = neighbour_medians(meas, fwd), neighbour_medians(meas_c, run)
+    for k in (2, 4):
+        assert abs(found[k][0] - expected[k][0]) <= 2               # about 10 and 15 arcs, not the 35 .. 50 of the rest
+        assert found[k][0] < 20
+        assert found[k][1] == pytest.approx(expected[k][1], abs=0.02)
+        assert found[k][1] == pytest.approx(1.0, abs=0.02)
+
+def test_the_final_reference_is_the_same_on_a_grid_that_runs_clockwise(joined, joined_clockwise):
+    _, meas, runs = joined
+    _, meas_c, runs_c = joined_clockwise
+    sref = sigma_ref_final([r for r in meas.rows if r["m"] == 1], runs)
+    sref_c = sigma_ref_final([r for r in meas_c.rows if r["m"] == 1], runs_c)
+    assert sref_c == pytest.approx(sref, rel=1e-3)
+    assert sref_c == pytest.approx(720.0, rel=0.02)
+
+@pytest.mark.parametrize("heavy_k", [2, 4], ids=["winding k - 1", "winding k + 1"])
+def test_a_heavy_neighbour_vetoes_a_join_on_a_grid_that_runs_clockwise(joined_clockwise, heavy_k):
+    ph, meas, runs = joined_clockwise
+    assert [r.k for r in runs] == [3]                               # control: the join is there without the veto
+    m1 = [dict(r) for r in meas.rows if r["m"] == 1]
+    for r in m1:
+        if r["k"] == heavy_k and angle_gap(r["theta"], ph["join_theta"]) < 0.9:
+            r["mass"] *= 2
+    assert all(run.k != 3 for run in find_join_runs(m1, meas.sigma_ref0))
+
+def test_the_crossing_rows_count_one_layer_more_on_a_grid_that_runs_clockwise(joined_clockwise):
+    ph, meas, runs = joined_clockwise
+    sref = sigma_ref_final([r for r in meas.rows if r["m"] == 1], runs)
+    crossing = [r for r in meas.rows if r["status"] == "ok" and r["k"] <= 3 < r["k"] + r["m"]
+                and in_join(3, r["u_path"][3 - r["k"]], runs)]
+    assert crossing and all(round(r["mass"] / sref) == expected_layers(r["k"], r["m"], r["u_path"], runs) == r["m"] + 1
+                            for r in crossing)
+
+
 # --- synthetic rows ----------------------------------------------------------------------------
 
 SIGMA = 8.0                  # a power of two: mass / SIGMA is exact, so a bound is hit exactly
@@ -115,6 +205,17 @@ def scene(heavy=range(0, 12), below=1.0, above=1.0, arcs=range(0, 12)):
     if above is not None:
         rows += curve_rows(4, arcs, above)
     return rows
+
+def counter_clockwise(rows):
+    """The rows as they are: theta grows with the arc (0.25 rad per arc)."""
+    return rows
+
+def clockwise(rows):
+    """The same rows (arcs 0 .. 11 of `scene`) on a grid that runs the other way: theta = 0.25 * (11 - arc),
+    so the angles are the same but theta falls along u."""
+    return [dict(r, theta=(0.25 * (11 - r["arc"])) % TWO_PI) for r in rows]
+
+ORIENTED = pytest.mark.parametrize("orient", [counter_clockwise, clockwise], ids=["counter-clockwise", "clockwise"])
 
 
 # --- the run: arcs, gaps, length, mass range ---------------------------------------------------
@@ -233,12 +334,14 @@ def test_a_run_ends_where_the_winding_stops_being_heavy():
 
 # --- the neighbours -----------------------------------------------------------------------------
 
-def test_both_neighbours_normal_keep_the_run():
-    assert len(runs_of(scene(below=1.0, above=1.0))) == 1
+@ORIENTED
+def test_both_neighbours_normal_keep_the_run(orient):
+    assert len(runs_of(orient(scene(below=1.0, above=1.0)))) == 1
 
-def test_a_heavy_neighbour_vetoes_the_run_whichever_side():
-    assert runs_of(scene(below=2.0, above=1.0)) == []
-    assert runs_of(scene(below=1.0, above=2.0)) == []
+@ORIENTED
+def test_a_heavy_neighbour_vetoes_the_run_whichever_side(orient):
+    assert runs_of(orient(scene(below=2.0, above=1.0))) == []
+    assert runs_of(orient(scene(below=1.0, above=2.0))) == []
 
 def test_a_light_neighbour_vetoes_the_run_as_well():
     assert runs_of(scene(below=0.5, above=1.0)) == []
@@ -250,9 +353,10 @@ def test_one_neighbour_with_no_data_and_the_other_normal_keeps_the_run():
     rows = scene(below=None) + curve_rows(2, range(40, 52), 3.0, theta=4.0)
     assert [r.k for r in runs_of(rows)] == [3]
 
-def test_a_neighbour_with_no_data_cannot_validate_the_run():
-    assert runs_of(scene(below=None, above=None)) == []
-    rows = (scene(below=None, above=None) + curve_rows(2, range(40, 52), 1.0, theta=4.0)
+@ORIENTED
+def test_a_neighbour_with_no_data_cannot_validate_the_run(orient):
+    assert runs_of(orient(scene(below=None, above=None))) == []
+    rows = (orient(scene(below=None, above=None)) + curve_rows(2, range(40, 52), 1.0, theta=4.0)
             + curve_rows(4, range(40, 52), 1.0, theta=4.0))
     assert runs_of(rows) == []                                  # normal arcs, but outside the angles of the run
 
@@ -281,15 +385,17 @@ def test_the_neighbour_range_is_a_parameter():
     assert runs_of(scene(below=2.0, above=2.0)) == []
     assert [r.k for r in runs_of(scene(below=2.0, above=2.0), neighbour_range=(1.9, 2.1))] == [2, 3, 4]
 
-def test_the_neighbour_is_judged_on_its_median():
+@ORIENTED
+def test_the_neighbour_is_judged_on_its_median(orient):
     # 7 normal arcs and 5 very heavy ones: the median is normal (the mean, 1.83, would not be)
-    rows = scene(above=None) + curve_rows(4, range(0, 12), lambda a: 1.0 if a < 7 else 3.0)
+    rows = orient(scene(above=None) + curve_rows(4, range(0, 12), lambda a: 1.0 if a < 7 else 3.0))
     assert len(runs_of(rows)) == 1
-    rows = scene(above=None) + curve_rows(4, range(0, 12), lambda a: 3.0 if a < 7 else 1.0)   # now the median is heavy
+    rows = orient(scene(above=None) + curve_rows(4, range(0, 12), lambda a: 3.0 if a < 7 else 1.0))  # median heavy
     assert runs_of(rows) == []
 
-def test_only_the_neighbour_arcs_inside_the_angles_of_the_run_count():
-    base = scene(above=None)                                    # the run (0 .. 2.75 rad), curve 2 normal
+@ORIENTED
+def test_only_the_neighbour_arcs_inside_the_angles_of_the_run_count(orient):
+    base = orient(scene(above=None))                            # the run (0 .. 2.75 rad), curve 2 normal
     heavy = lambda theta: [row(4, 50 + i, 3.0, theta=theta) for i in range(30)]
     assert len(runs_of(base + curve_rows(4, range(20, 40), 3.0, theta=4.0))) == 1     # at 4 rad: ignored
     assert len(runs_of(base + heavy(0.25 * 11 + 0.01))) == 1                # just after the last arc: ignored
@@ -297,11 +403,28 @@ def test_only_the_neighbour_arcs_inside_the_angles_of_the_run_count():
     assert runs_of(base + heavy(0.25 * 11 - 0.01)) == []                    # just inside: they veto
     assert runs_of(base + heavy(0.01)) == []
 
-@pytest.mark.parametrize("edge", [0.0, 0.25 * 11], ids=["first arc", "last arc"])
-def test_the_angles_of_the_run_are_inclusive_at_both_ends(edge):
+@ORIENTED
+@pytest.mark.parametrize("edge", [0.0, 0.25 * 11], ids=["lowest angle", "highest angle"])
+def test_the_angles_of_the_run_are_inclusive_at_both_ends(orient, edge):
     on_edge = [row(4, 50 + i, 3.0, theta=edge) for i in range(20)]
-    assert runs_of(scene(above=None) + on_edge) == []           # 20 heavy arcs at exactly one end of the angles count
+    assert runs_of(orient(scene(above=None)) + on_edge) == []   # 20 heavy arcs at exactly one end of the angles count
 
+
+def test_a_heavy_neighbour_inside_the_angles_of_a_clockwise_run_vetoes_it():
+    # theta falls along u (2.75 -> 0 rad).  Read from the first arc to the last "with increasing angle" that would be
+    # the complement of the run (2.75 -> 2 pi), where curve 4 is normal; the heavy arcs inside the run would not count.
+    base = clockwise(scene(above=None))
+    outside = [row(4, 40 + i, 1.0, theta=3.2 + 0.1 * i) for i in range(30)]       # 3.2 .. 6.1 rad: not in the run
+    inside = [row(4, 80 + i, 3.0, theta=0.1 + 0.2 * i) for i in range(12)]        # 0.1 .. 2.3 rad: in the run
+    assert len(runs_of(base + outside)) == 1                    # control: nothing heavy inside, curve 2 validates it
+    assert runs_of(base + outside + inside) == []
+
+def test_a_light_neighbour_inside_the_angles_of_a_clockwise_run_vetoes_it_too():
+    base = clockwise(scene(below=None, above=1.0))
+    outside = [row(2, 40 + i, 1.0, theta=3.2 + 0.1 * i) for i in range(30)]
+    inside = [row(2, 80 + i, 0.4, theta=0.1 + 0.2 * i) for i in range(12)]
+    assert len(runs_of(base + outside)) == 1
+    assert runs_of(base + outside + inside) == []
 
 def test_neighbours_that_are_not_mass_valid_or_not_one_sheet_do_not_count():
     junk = curve_rows(4, range(0, 12), 3.0, status="short") + curve_rows(4, range(0, 12), 3.0, m=2)
@@ -317,47 +440,91 @@ def test_a_neighbour_with_a_degenerate_band_is_judged_on_its_mass():
 
 # --- the angle of the run goes through 2 pi -----------------------------------------------------
 
-def across_two_pi(neighbour_theta, neighbour_ratio=1.0, other=None):
-    """A join of 12 arcs from 6.0 to 8.75 rad (2.75 rad = 0.25 rad per arc) mod 2 pi, and the arcs of curve 4."""
-    rows = [row(3, a, 2.0, theta=6.0 + 0.25 * a) for a in range(0, 12)]
+def across_two_pi(neighbour_theta, neighbour_ratio=1.0, other=None, clockwise=False):
+    """A join of 12 arcs over 6.0 .. 8.75 rad (0.25 rad per arc) mod 2 pi, and the arcs of curve 4 (and of curve 2
+    if `other` = (thetas, ratio)).  Counter-clockwise the arcs go from 6.0 up to 8.75, clockwise from 8.75 down
+    to 6.0."""
+    rows = [row(3, a, 2.0, theta=(8.75 - 0.25 * a) if clockwise else (6.0 + 0.25 * a)) for a in range(0, 12)]
     rows += [row(4, 100 + i, neighbour_ratio, theta=t) for i, t in enumerate(neighbour_theta)]
     if other is not None:
         rows += [row(2, 200 + i, other[1], theta=t) for i, t in enumerate(other[0])]
     return rows
 
-def test_a_run_through_two_pi_is_found_with_its_neighbours_on_both_sides_of_the_turn():
-    rows = across_two_pi([6.1, 6.2, 0.1, 0.5, 1.0, 2.0])        # normal arcs, before and after the turn
-    run, = runs_of(rows)
-    assert run.theta_lo == pytest.approx(6.0) and run.theta_hi == pytest.approx((6.0 + 0.25 * 11) % TWO_PI)
-    assert run.theta_lo > run.theta_hi                          # the interval goes through 2 pi
+CLOCKWISE = pytest.mark.parametrize("clockwise", [False, True], ids=["counter-clockwise", "clockwise"])
 
-def test_neighbour_arcs_after_the_turn_are_inside_the_interval():
-    rows = across_two_pi([0.1, 0.5, 1.0, 2.0])                  # only after the turn: still data
+@CLOCKWISE
+def test_a_run_through_two_pi_is_found_with_its_neighbours_on_both_sides_of_the_turn(clockwise):
+    rows = across_two_pi([6.1, 6.2, 0.1, 0.5, 1.0, 2.0], clockwise=clockwise)   # normal arcs, before and after the turn
+    run, = runs_of(rows)
+    # the angles of the arcs are unwrapped along u starting from the first arc: counter-clockwise 6.0 .. 8.75,
+    # clockwise -0.283 .. 2.467 (the same angles minus a turn); always lo <= hi and a width of 2.75 rad
+    assert run.theta_lo <= run.theta_hi
+    assert run.theta_hi - run.theta_lo == pytest.approx(0.25 * 11)
+    assert abs(((run.theta_lo - 6.0 + np.pi) % TWO_PI) - np.pi) < 1e-9
+    if clockwise:
+        assert (run.theta_lo, run.theta_hi) == (pytest.approx(6.0 - TWO_PI), pytest.approx(8.75 - TWO_PI))
+    else:
+        assert (run.theta_lo, run.theta_hi) == (pytest.approx(6.0), pytest.approx(8.75))
+
+@CLOCKWISE
+def test_neighbour_arcs_after_the_turn_are_inside_the_interval(clockwise):
+    rows = across_two_pi([0.1, 0.5, 1.0, 2.0], clockwise=clockwise)             # only after the turn: still data
     assert len(runs_of(rows)) == 1
-    heavy = across_two_pi([0.1, 0.5, 1.0, 2.0], neighbour_ratio=3.0)
+    heavy = across_two_pi([0.1, 0.5, 1.0, 2.0], neighbour_ratio=3.0, clockwise=clockwise)
     assert runs_of(heavy) == []
 
-def test_neighbour_arcs_before_the_turn_are_inside_the_interval():
-    assert len(runs_of(across_two_pi([6.05, 6.2]))) == 1
-    assert runs_of(across_two_pi([6.05, 6.2], neighbour_ratio=3.0)) == []
+@CLOCKWISE
+def test_neighbour_arcs_before_the_turn_are_inside_the_interval(clockwise):
+    assert len(runs_of(across_two_pi([6.05, 6.2], clockwise=clockwise))) == 1
+    assert runs_of(across_two_pi([6.05, 6.2], neighbour_ratio=3.0, clockwise=clockwise)) == []
 
-def test_neighbour_arcs_outside_the_interval_through_two_pi_are_ignored():
+@CLOCKWISE
+def test_neighbour_arcs_outside_the_interval_through_two_pi_are_ignored(clockwise):
     # 3 .. 5.9 rad are in the complement of [6.0, 8.75 mod 2 pi = 2.47]: the heavy arcs there do not count
-    rows = across_two_pi([0.1, 6.1], other=([3.0, 3.5, 4.0, 5.0, 5.9] * 3, 3.0))
+    rows = across_two_pi([0.1, 6.1], other=([3.0, 3.5, 4.0, 5.0, 5.9] * 3, 3.0), clockwise=clockwise)
     assert len(runs_of(rows)) == 1
-    rows = across_two_pi([3.0, 4.0, 5.0], other=([3.0, 3.5, 4.0], 1.0))
+    rows = across_two_pi([3.0, 4.0, 5.0], other=([3.0, 3.5, 4.0], 1.0), clockwise=clockwise)
     assert runs_of(rows) == []                                  # nothing inside: nothing validates
 
-LAST_THETA = (6.0 + 0.25 * 11) % TWO_PI                        # the last arc of across_two_pi
+@CLOCKWISE
+def test_a_run_of_a_full_turn_or_more_sees_every_angle(clockwise):
+    # 30 arcs, 0.25 rad each: 7.25 rad, more than a turn.  Curve 4 is heavy at 5.0 rad only: every angle is in the run
+    rows = [row(3, a, 2.0, theta=0.25 * (29 - a) if clockwise else 0.25 * a) for a in range(30)]
+    rows += curve_rows(2, range(40, 50), 1.0, theta=0.1) + curve_rows(4, range(40, 50), 3.0, theta=5.0)
+    assert runs_of(rows) == []
+    rows = [row(3, a, 2.0, theta=0.25 * (29 - a) if clockwise else 0.25 * a) for a in range(30)]
+    rows += curve_rows(2, range(40, 50), 1.0, theta=0.1) + curve_rows(4, range(40, 50), 1.0, theta=5.0)
+    assert [r.k for r in runs_of(rows)] == [3]
 
+LAST_THETA = (6.0 + 0.25 * 11) % TWO_PI                        # the highest angle of across_two_pi
+
+@CLOCKWISE
 @pytest.mark.parametrize("edge, outside", [(6.0, 6.0 - 0.01), (LAST_THETA, LAST_THETA + 0.01)],
-                         ids=["first arc", "last arc"])
-def test_the_ends_of_an_interval_through_two_pi_are_inclusive(edge, outside):
+                         ids=["lowest angle", "highest angle"])
+def test_the_ends_of_an_interval_through_two_pi_are_inclusive(clockwise, edge, outside):
     validated = ([6.1], 1.0)                                    # one normal arc of curve 2 inside the interval
-    at_end = across_two_pi([edge] * 10, neighbour_ratio=3.0, other=validated)
-    beyond = across_two_pi([outside] * 10, neighbour_ratio=3.0, other=validated)
+    at_end = across_two_pi([edge] * 10, neighbour_ratio=3.0, other=validated, clockwise=clockwise)
+    beyond = across_two_pi([outside] * 10, neighbour_ratio=3.0, other=validated, clockwise=clockwise)
     assert runs_of(at_end) == []                                # heavy arcs at the end of the interval: veto
     assert len(runs_of(beyond)) == 1                            # just beyond: ignored
+
+
+# Angles for which the unwrapped end of the interval and the wrapped angle of the same arc differ by one rounding
+# error: without a tolerance the end of the interval is left out (found by a random search, 4 decimals kept).
+ROUNDING = [
+    pytest.param([5.807, 6.0458, 6.1672, 0.0049, 0.1453, 0.4222, 0.6582, 0.928, 1.1569, 1.3382, 1.5415, 1.7602],
+                 1.7602, id="counter-clockwise, highest angle"),
+    pytest.param([1.1255, 0.8609, 0.6695, 0.5141, 0.3303, 0.1768, 6.2132, 6.1015, 5.9436, 5.779, 5.6427, 5.395],
+                 5.395, id="clockwise, lowest angle"),
+]
+
+@pytest.mark.parametrize("thetas, end", ROUNDING)
+def test_the_end_of_the_angles_is_inside_whatever_the_rounding_of_the_turn(thetas, end):
+    run = [row(3, a, 2.0, theta=t) for a, t in enumerate(thetas)]
+    validated = [row(2, 100, 1.0, theta=thetas[5])]            # one normal arc of curve 2 inside the run
+    heavy_at_end = [row(4, 200 + i, 3.0, theta=end) for i in range(10)]
+    assert len(runs_of(run + validated)) == 1
+    assert runs_of(run + validated + heavy_at_end) == []
 
 
 # --- companion slices -----------------------------------------------------------------------------

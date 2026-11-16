@@ -42,6 +42,10 @@ class SliceMeasure:
     """What ``measure_slice`` measures on one slice.
 
     ``rows``: one dict per (curve ``k``, arc, ``m``), keys ``ROW_KEYS_EXTENDED``, plain Python values.
+    A row with ``status == "ok"`` guarantees a finite ``mass``, ``spacing_px`` and ``c`` (>= ``MIN_INCLINATION``),
+    NOT a finite ``band_mass``: the band variant is NaN where its polygon is degenerate (an arc of one point),
+    folds (see ``band_mass``) or covers a NaN pixel.  A consumer of ``band_mass`` scores it only where it is
+    finite and counts the other "ok" rows as band discards.
     ``profiles[k]`` (for each curve that starts paths, ``k < len(curves) - 1``): ``"grey"`` (P, S) float32,
     the raw grey along each path (NaN outside the image; 1 in control mode), ``"t"`` and ``"c"``
     (P, m_max) the distance to the crossing with the curve ``k + j + 1`` and the inclination of the path
@@ -282,7 +286,15 @@ def _polyline_length(xy: np.ndarray) -> float:
 
 def band_mass(rho_img: np.ndarray, inner_xy, outer_xy) -> float:
     """Sum of ``rho_img`` over the pixel centres inside the polygon ``inner_xy`` then ``outer_xy`` reversed,
-    divided by the mean length of the two polylines; NaN if that length is 0 or a point is NaN.
+    divided by the mean length of the two polylines.
+
+    NaN (a band discard, never a wrong value) if a point is NaN, if the polygon has fewer than 3 vertices
+    or a zero mean edge, if the start edge ``inner_xy`` has the same first and last point, or if the polygon
+    folds: along the direction ``d`` from the first to the last point of ``inner_xy``, every step between
+    consecutive points of ``inner_xy`` and every step between consecutive points of ``outer_xy`` must have a
+    non-negative component (``step . d >= 0``).  A step backwards means the edge doubles back (normals that
+    converge where a curve bends), the polygon then crosses itself and its pixel sum misses part of the band.
+    The test is O(n) per arc.  A NaN pixel inside the polygon makes the result NaN as well.
 
     Only the pixel centres of the polygon's bounding box that lie in the image are tested
     (``matplotlib.path.Path.contains_points``); no inclination correction.
@@ -294,6 +306,11 @@ def band_mass(rho_img: np.ndarray, inner_xy, outer_xy) -> float:
     edge = (_polyline_length(inner) + _polyline_length(outer)) / 2.0
     if not edge > 0:
         return float("nan")
+    direction = inner[-1] - inner[0]
+    if not np.hypot(*direction) > 0:
+        return float("nan")
+    if (np.diff(inner, axis=0) @ direction < 0).any() or (np.diff(outer, axis=0) @ direction < 0).any():
+        return float("nan")                                   # an edge goes backwards: the polygon folds
     height, width = rho_img.shape
     x0, y0 = (max(int(np.ceil(v)), 0) for v in polygon.min(axis=0))
     x1 = min(int(np.floor(polygon[:, 0].max())), width - 1)
@@ -423,7 +440,9 @@ def measure_slice(img: SliceImage, curves: list[Curve], center_xy, m_max: int = 
        ``"short"`` if fewer than ``MIN_VALID_PROFILE_SHARE`` of its profiles are valid (``motif``: the most
        frequent of "hole", "self", "order" among the others, "" if none), else ``"inclined"`` if ``c`` is
        below ``MIN_INCLINATION``, else ``"ok"``.  Only the "ok" rows get ``spacing_px``, ``mass`` and
-       ``band_mass`` (NaN otherwise).
+       ``band_mass`` (NaN otherwise).  An "ok" row always has a finite ``mass`` and ``spacing_px``; its
+       ``band_mass`` may still be NaN (degenerate or folded polygon, NaN pixel: see ``band_mass``), and the
+       status does not depend on it.
     4. Clean rows: the "ok" ``m = 1`` rows whose spacing exceeds the median spacing of the "ok" ``m = 1``
        rows of the slice.  The air map comes from their valid profiles (``air_map``, tiles of
        ``AIR_TILE_MM``); ``ValueError`` if there is none.

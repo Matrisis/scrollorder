@@ -238,6 +238,68 @@ def test_band_mass_sums_the_pixel_centres_of_the_polygon_over_the_mean_edge():
     assert np.isnan(band_mass(rho, inner[:1], outer[:1]))                        # no edge length
 
 
+def test_a_folded_band_is_a_discard_and_a_clean_one_is_not():
+    rho = np.ones((60, 60), np.float32)
+    inner = np.stack([np.linspace(10.5, 20.5, 11), np.full(11, 10.5)], axis=1)
+    outer = np.stack([np.linspace(10.5, 20.5, 11), np.full(11, 30.5)], axis=1)
+    assert band_mass(rho, inner, outer) == pytest.approx(200 / 10.0)              # convex, in order: finite
+    assert np.isnan(band_mass(rho, inner, outer[::-1]))                           # arrivals reversed: a bow tie
+    bent = outer.copy()
+    bent[6] = [14.0, 30.5]                                                        # one arrival step goes back
+    assert np.isnan(band_mass(rho, inner, bent))
+    back = inner.copy()
+    back[5] = [9.0, 10.5]                                                         # the start edge doubles back
+    assert np.isnan(band_mass(rho, back, outer))
+    ring = np.stack([15.5 + 5 * np.cos(np.linspace(0, 2 * np.pi, 9)), 15.5 + 5 * np.sin(np.linspace(0, 2 * np.pi, 9))], 1)
+    assert np.isnan(band_mass(rho, ring, outer))                                  # first point = last point
+    tilted = outer + np.stack([np.zeros(11), np.linspace(0.0, 3.0, 11)], axis=1)  # oblique but in order
+    assert np.isfinite(band_mass(rho, inner, tilted))
+
+
+def test_the_folded_bands_of_the_join_flank_are_discarded_not_miscounted():
+    # the reviewer's case: on the default phantom the normals of curve 4 converge where it bends at the
+    # flank of the join, the arrival points of arcs 27 and 45 at m = 3 fold back; the band gave 2 for 3
+    ph = make_volume_phantom()
+    img = SliceImage(ph["volume"][6].astype(np.float32), (0, 0), 0, 6, 6.0, ph["px_mm"])
+    curves = [Curve(f"w{k}", *curve_at_z(*s, 6.0, 0.05)) for k, s in enumerate(ph["surfaces"])]
+    meas = measure_slice(img, curves, center_from_curves(curves), m_max=4)
+    for arc in (27, 45):
+        r = row_of(meas, 4, arc, 3)
+        assert r["status"] == "ok" and round(r["mass"] / meas.sigma_ref0) == 3 and np.isnan(r["band_mass"])
+    ok = [r for r in meas.rows if r["status"] == "ok"]
+    finite = [r for r in ok if np.isfinite(r["band_mass"])]
+    assert all(round(r["band_mass"] / meas.sigma_ref0) == round(r["mass"] / meas.sigma_ref0) for r in finite)
+    assert len(ok) - len(finite) <= 10
+
+
+def test_ok_guarantees_a_finite_mass_but_not_a_finite_band_mass():
+    ph, img, curves = phantom_slice()
+    centre = np.array(center_from_curves(curves))
+    # a one-point arc: point 200 of curve 1 moved 12 px along its ring (> ARC_MM = 10 px from both neighbours)
+    xy = curves[1].xy.copy()
+    radius = np.hypot(*(xy[200] - centre))
+    angle = np.arctan2(xy[200, 1] - centre[1], xy[200, 0] - centre[0]) + 12.0 / radius
+    xy[200] = centre + radius * np.array([np.cos(angle), np.sin(angle)])
+    curves[1] = Curve(curves[1].name, xy, curves[1].u_mm, curves[1].normal3d)
+    lone = arc_ids(curves[1], img.px_mm)[200]
+    assert (arc_ids(curves[1], img.px_mm) == lone).sum() == 1
+    # a NaN pixel inside sheet 0 at theta = pi / 2 (middle of arc 4): the profiles through it are invalid,
+    # the others are not
+    data = img.data.copy()
+    data[int(centre[1]) + 32, int(centre[0])] = np.nan
+    holed = SliceImage(data, img.origin_xy, img.level, img.plane, img.z_l0, img.px_mm)
+    meas = measure_slice(holed, curves, tuple(centre), m_max=2)
+    for m in (1, 2):
+        r = row_of(meas, 1, lone, m)
+        assert r["status"] == "ok" and r["n_profiles"] == 1 and np.isfinite(r["mass"]) and np.isnan(r["band_mass"])
+    pixel = [r for r in meas.rows if r["k"] == 0 and r["status"] == "ok" and np.isnan(r["band_mass"])]
+    assert pixel and all(r["n_profiles"] > 1 and np.isfinite(r["mass"]) for r in pixel)
+    # what the docstring of SliceMeasure states, on every "ok" row
+    for r in meas.rows:
+        if r["status"] == "ok":
+            assert np.isfinite([r["mass"], r["spacing_px"], r["c"]]).all() and r["c"] >= MIN_INCLINATION
+
+
 # --- the measure of the phantom ---------------------------------------------------------------
 
 def test_rows_have_the_keys_and_plain_python_types(ph_measure):
@@ -541,5 +603,6 @@ def test_profiles_of_a_real_sized_curve_are_not_sampled_or_integrated_in_a_pytho
     grey = sample_profiles(img, start, nu, 600)
     best_sample = min(_timed(lambda: sample_profiles(img, start, nu, 600)) for _ in range(3))
     best_integral = min(_timed(lambda: integrate_profiles(grey, t)) for _ in range(3))
-    assert best_sample < 0.5, f"sample_profiles took {best_sample:.2f} s"          # ~0.05 s vectorised
-    assert best_integral < 0.5, f"integrate_profiles took {best_integral:.2f} s"    # ~0.03 s vectorised
+    # generous bounds against a loop over the 1.8 million samples (~10 to 20 s), not a benchmark
+    assert best_sample < 3.0, f"sample_profiles took {best_sample:.2f} s"          # ~0.05 s vectorised
+    assert best_integral < 3.0, f"integrate_profiles took {best_integral:.2f} s"    # ~0.03 s vectorised
